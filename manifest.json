@@ -1,0 +1,9 @@
+{
+  "id": "learning-hub",
+  "name": "Learning Hub",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Native Obsidian learning workspace with a personal dashboard and course spaces.",
+  "author": "haoyuanzhang2007",
+  "isDesktopOnly": true
+}

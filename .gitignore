@@ -1,0 +1,26 @@
+# Runtime data and credentials are never source or release assets.
+.obsidian/
+.learning-hub/
+.note-data/
+**/.learning-hub/
+**/.note-data/
+**/data.json
+**/study-progress.json
+**/study-reader.json
+**/vault-guide.json
+**/vault-guide-change-log.json
+**/conversations.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.log
+backup*/
+qa/
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+dist/
+artifacts/
