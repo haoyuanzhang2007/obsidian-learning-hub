@@ -247,3 +247,7 @@ Modules cover Codex, DeepSeek streaming, course and lecture generation, assignme
 - Review AI output. Preparation, main notes, review questions, syllabus analysis, and AI schedules retain draft confirmation steps.
 
 See [CHANGELOG.md](CHANGELOG.md) for version changes.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). Copyright (c) 2026 haoyuanzhang2007.

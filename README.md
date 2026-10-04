@@ -247,3 +247,7 @@ python3 scripts/package-release.py
 - AI 内容需要核对；预习、主笔记、复习、Syllabus 与 AI 日程保留草案确认步骤。
 
 版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 开源协议
+
+本项目采用 [MIT 协议](LICENSE)。Copyright (c) 2026 haoyuanzhang2007。
