@@ -910,7 +910,7 @@ const https = require('https');
 const { Plugin, PluginSettingTab, Setting, MarkdownView, Notice, MarkdownRenderer, Component, setIcon } = require('obsidian');
 const TOOLBAR = 'study-selection-toolbar';
 const FORMULA_SOURCES = new WeakMap();
-const DEFAULTS = { model: '', endpoint: 'https://api.deepseek.com/chat/completions', contextLines: 3 };
+const DEFAULTS = { contextLines: 3 };
 const CONTEXT_LINE_OPTIONS = [0, 1, 3, 5, 10];
 const contextLineCount = (value) => CONTEXT_LINE_OPTIONS.includes(Number(value)) ? Number(value) : DEFAULTS.contextLines;
 const SYSTEM_PROMPT = '你是严谨、清晰的学习助手。首次回答只解释【选中内容】；提供的上下文仅用于理解术语和指代，不要解释或概括上下文。随后保持连续对话。用简体中文回答。默认用一两段简洁文字或少量要点，不要为简单问题制作表格。用户要求深入时再展开。使用标准 Markdown。行内数学只用 $...$，独立公式只用单独成行的 $$...$$，不要使用 \\(...\\) 或 \\[...\\]。只有用户明确要求画图时才输出 Mermaid。不要假装看过未提供的整篇文档。';
@@ -1351,15 +1351,7 @@ class ExplainerSettings extends PluginSettingTab {
     const root = this.containerEl;
     root.empty();
     root.createEl('h2', { text: 'AI 解释设置' });
-    root.createEl('p', { text: 'API Key 使用本页面 DeepSeek API 设置中的共用密钥。' });
-    new Setting(root).setName('模型 ID').setDesc('请填写所用服务在控制台提供的准确模型 ID。')
-      .addText((text) => text.setPlaceholder('模型 ID').setValue(this.plugin.settings.model).onChange(async (value) => {
-        this.plugin.settings.model = value.trim(); await this.plugin.saveData(this.plugin.settings);
-      }));
-    new Setting(root).setName('接口地址').setDesc('默认使用 DeepSeek 官方 Chat Completions 接口。')
-      .addText((text) => text.setValue(this.plugin.settings.endpoint).onChange(async (value) => {
-        this.plugin.settings.endpoint = value.trim(); await this.plugin.saveData(this.plugin.settings);
-      }));
+    root.createEl('p', { text: 'API Key、接口地址和默认模型均使用 Learning Hub 设置中的 DeepSeek API 配置。' });
     new Setting(root).setName('解释上下文范围')
       .setDesc('控制发送给 AI 的选中内容周边文字；选中内容前后各取相同行数。')
       .addDropdown((dropdown) => {
@@ -1451,12 +1443,25 @@ function streamChat(endpoint, apiKey, payload, onDelta, onRequest, inactivityTim
 module.exports = class SelectionExplainer extends Plugin {
   async onload() {
     const savedSettings = Object.assign({}, await this.loadData());
-    const hadLegacyApiKey = Object.prototype.hasOwnProperty.call(savedSettings, 'apiKey');
-    const legacyApiKey = savedSettings.apiKey;
+    const legacyApi = savedSettings.api && typeof savedSettings.api === 'object' ? savedSettings.api : {};
+    const hadLegacyApiKey = Object.prototype.hasOwnProperty.call(savedSettings, 'apiKey') ||
+      Object.prototype.hasOwnProperty.call(legacyApi, 'apiKey');
+    const hadLegacyModelOverrides = Object.prototype.hasOwnProperty.call(savedSettings, 'model') ||
+      Object.prototype.hasOwnProperty.call(savedSettings, 'endpoint') ||
+      Object.prototype.hasOwnProperty.call(legacyApi, 'model') ||
+      Object.prototype.hasOwnProperty.call(legacyApi, 'endpoint');
+    const hadLegacyApiSettings = Object.prototype.hasOwnProperty.call(savedSettings, 'api');
+    const legacyApiKey = savedSettings.apiKey || legacyApi.apiKey;
+    if (!Object.prototype.hasOwnProperty.call(savedSettings, 'contextLines') && legacyApi.contextLines != null) {
+      savedSettings.contextLines = legacyApi.contextLines;
+    }
     await this.adoptSharedDeepSeekApiKey?.(legacyApiKey);
     delete savedSettings.apiKey;
+    delete savedSettings.api;
+    delete savedSettings.model;
+    delete savedSettings.endpoint;
     this.settings = Object.assign({}, DEFAULTS, savedSettings);
-    if (hadLegacyApiKey) await this.saveData(this.settings);
+    if (hadLegacyApiKey || hadLegacyModelOverrides || hadLegacyApiSettings) await this.saveData(this.settings);
 
     this.session = null;
     this.requestId = 0;
@@ -1527,13 +1532,15 @@ module.exports = class SelectionExplainer extends Plugin {
     if (!quote) return new Notice('请先选中文本');
     
     if (quote.length > 12000) return new Notice('选中内容过长，请缩短到 12000 字以内');
-    if (!this.getSharedDeepSeekSettings?.().apiKey) {
-      new Notice('请先在 Learning Hub 设置中填写共用 DeepSeek API Key 和 AI 解释模型 ID');
+    const deepseek = this.getSharedDeepSeekSettings?.() || {};
+    if (!deepseek.apiKey) {
+      new Notice('请先在 Learning Hub 设置中填写共用 DeepSeek API Key');
       this.app.setting?.open();
       this.app.setting?.openTabById?.(this.settingsHost?.manifest.id || this.manifest.id);
       return;
     }
-    try { if (new URL(this.settings.endpoint).protocol !== 'https:') throw new Error(); }
+    const endpoint = deepseek.endpoint || 'https://api.deepseek.com/chat/completions';
+    try { if (new URL(endpoint).protocol !== 'https:') throw new Error(); }
     catch { return new Notice('接口地址必须是有效的 HTTPS 地址'); }
     this.closeCard();
     let context;
@@ -1640,6 +1647,8 @@ module.exports = class SelectionExplainer extends Plugin {
   async sendTurn(message, showUser, detailed = false) {
     const session = this.session;
     if (!session || session.loading) return;
+    const deepseek = this.getSharedDeepSeekSettings?.() || {};
+    const endpoint = deepseek.endpoint || 'https://api.deepseek.com/chat/completions';
     session.loading = true;
     session.send.disabled = true;
     this.syncActions(session);
@@ -1658,8 +1667,8 @@ module.exports = class SelectionExplainer extends Plugin {
     const requestId = ++this.requestId;
     let answer = '';
     try {
-      await streamChat(this.getSharedDeepSeekSettings().endpoint || this.settings.endpoint, this.getSharedDeepSeekSettings().apiKey, {
-        model: this.settings.model || this.getSharedDeepSeekSettings().model || 'deepseek-flash',
+      await streamChat(endpoint, deepseek.apiKey, {
+        model: deepseek.model || 'deepseek-flash',
         messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...session.history],
         thinking: { type: detailed ? 'enabled' : 'disabled' },
         ...(detailed ? {reasoning_effort:'high'} : {}),

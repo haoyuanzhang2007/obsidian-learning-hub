@@ -2,252 +2,124 @@
 
 [简体中文](README.md) · **English**
 
-**Learning Hub 1.0.0** is a learning workspace for Obsidian desktop. It brings courses, lectures, preparation, main notes, recall, spaced review, assignments, annotations, tasks, and schedules into one plugin while keeping Markdown and PDF workflows native to Obsidian.
+**Learning Hub v1.1.0** is a desktop Obsidian learning workspace for courses, previews, main notes, recall, spaced review, homework, Tutorial and Lab resources, tasks and schedules. Original Markdown, PDF and Notebook files remain in your vault.
 
-The plugin starts with an empty vault: it creates the required folders and entry notes on first activation. Courses and tasks are empty, and no accounts, personal courses, API keys, calendar authorization, or conversations are included. Basic management works without an AI account. Configure your own Codex or DeepSeek access when you want generated content.
+[Download v1.1.0](https://github.com/haoyuanzhang2007/obsidian-learning-hub/releases/tag/1.1.0) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/haoyuanzhang2007/obsidian-learning-hub/issues)
 
-[Download 1.0.0](https://github.com/haoyuanzhang2007/obsidian-learning-hub/releases/tag/1.0.0) · [Report an issue](https://github.com/haoyuanzhang2007/obsidian-learning-hub/issues)
+First launch creates missing folders and entry notes, preserves existing notes and starts with no courses or tasks. No personal course files, timetable, accounts, credentials or conversations are included.
+
+## What's new
+
+- Seven-day task overview and a fixed three-day calendar. The calendar includes courses, tasks, waking, sleep, meals, exercise and rest, with a wider selected day.
+- Codex generates schedule drafts for unconfirmed dates. DeepSeek supports ongoing conversations to adjust schedules or change time rules; preview and confirm before applying.
+- Urgent tasks take priority; pinning affects display only. Optional duration estimates and ongoing projects without an expected end date are supported.
+- Uploaded lessons generate relevant preview tasks. Recall and spaced-review tasks synchronize with learning state and unlock dates. Calendar events do not create phantom lesson files.
+- Homework uploads organize questions, estimate duration and create linked tasks. Cards open a detail page, where individual subquestions can be marked as mistakes.
+- A shared Homework / Tutorial / Lab library with wider category navigation, consistent cards, details, upload controls and empty states.
+- Tutorial and Lab packs combine PDF, Markdown, TXT and `.ipynb` sources, distinguish exercises, provided answers, explanations and code templates, and can be linked to a lesson.
+- Review generation and the assistant reference relevant Tutorial / Lab material, including answers, templates and source pages or cells. Unlinked resources remain course-level references; review use can be disabled.
+- Consistent AI usage panels show concise totals and expandable input, output, cache, reasoning, thread and context details. DeepSeek costs remain estimates; token counts are not remaining account quota.
+- Chinese and English UI. System AI replies follow the interface language; learning content and the study assistant retain their separate language settings.
 
 ## Features
 
-| Area | What you can do |
+| Area | Purpose |
 | --- | --- |
-| Learning home | View current-semester courses, learning progress, upcoming deadlines, and schedules |
-| Semesters and courses | Create and switch semesters, create courses, and reuse course materials across semesters |
-| Course overview | Upload a syllabus and confirm the AI analysis before creating an overview |
-| Lectures and materials | Create lectures, upload multiple materials, and switch between PDFs and learning pages |
-| Preparation | Combine a lecture's text-based PDFs into summaries, a knowledge map, and individually checked concept blocks |
-| Main notes | Generate a draft from materials and preparation feedback; confirm before writing lecture Markdown |
-| Post-class recall | Answer first, reveal the answer, self-assess, and record weak areas |
-| Spaced review | Organize three rounds at 1, 7, and 21 days, retaining answers and completion state |
-| Assignments | Upload PDF, Markdown, or TXT files, organize questions, mark errors, and link deadline tasks |
-| Lab Sessions | Organize experimental goals, steps, conditions, and submission requirements separately |
-| Learning assistant | Stream DeepSeek conversations with page context, selected text, `@` file references, and conversation history |
-| Reading and annotations | Explain selected text with formula context and add page annotations in native Markdown reading |
-| Study progress | Show progress rings on notes and internal links for preparation, learning, and review |
-| Tasks and scheduling | Add tasks manually or confirm AI proposals; manage availability, fixed commitments, and rolling schedules |
-| Retrospective | Review completion records, actual time spent, and recent activity heatmaps |
-| Draft notebook | Create timestamped drafts and optionally generate titles with DeepSeek |
-| Vault guide | Generate a local directory guide in a separate note and optionally enable AI revisions |
+| Home, semesters and courses | Course navigation, progress and deadlines |
+| Syllabus and lecture materials | Source-grounded course setup, multiple slide files and richer lesson guides |
+| Preview, notes and recall | Side-by-side preview, knowledge feedback, confirmed note drafts and answer-first self-assessment |
+| Spaced review | Three rounds at 1, 7 and 21 days with mistakes and relevant practice sources |
+| Homework and practice | Detail pages, subquestion mistakes, Tutorial / Lab multi-file packs |
+| Assistant | DeepSeek streaming, page context, selection, `@` references and history |
+| Tasks and schedules | Urgency, optional estimates, ongoing tasks, seven-day planning and three-day calendar |
+| Reading and progress | Markdown annotations, selection explanations, formula context and progress rings |
+| Retrospective and drafts | Completion history, actual time, heatmap and optional automatic draft titles |
+| Vault guide | Local directory guide with optional AI maintenance |
 
-Interface language, assistant language, and generated-material language are configured separately. Chinese and English are supported. Language settings apply to subsequent generation; existing notes retain their original text.
+## Install or upgrade
 
-## Requirements
+Requires **Obsidian desktop 1.4.0 or later**. Node.js, Electron and local filesystem APIs are used; mobile is not supported.
 
-- **Obsidian desktop**. The manifest declares a minimum version of **1.4.0**. A current stable version is recommended.
-- The plugin uses the local filesystem, Node.js, and Electron APIs. **Mobile is not supported**.
-- Basic course management, tasks, drafts, annotations, and progress do not require an API key.
-- Codex generation requires **Codex CLI** installed and signed in locally, with `codex app-server` available.
-- DeepSeek features require your own API key and network access to the configured HTTPS endpoint.
-- PDF text extraction requires **Poppler's `pdftotext`**. Run OCR on scanned PDFs first. PPT/PPTX files can be archived but are not parsed.
-- Google Calendar is optional and requires your own Google Cloud desktop OAuth client.
+1. Download `learning-hub-1.1.0.zip`, or the individual `main.js`, `manifest.json` and `styles.css` release assets.
+2. Place those three files directly in `<vault>/.obsidian/plugins/learning-hub/`. Use your custom configuration directory if applicable.
+3. Restart Obsidian and enable Learning Hub in Community plugins.
+4. Open the learning-space ribbon icon or the Learning Hub home command.
 
-## Installation
+For upgrades, back up your vault and replace only the three program files, preserving runtime data. Installation does not require Python, npm dependencies or source modules. GitHub's automatic source archives are different from the install ZIP.
 
-### Manual installation
+BRAT users can add `haoyuanzhang2007/obsidian-learning-hub`. The release tag is `1.1.0`, matching the manifest. A GitHub release does not imply acceptance into the official Obsidian community plugin directory.
 
-1. Download `learning-hub-1.0.0.zip` from [Releases](https://github.com/haoyuanzhang2007/obsidian-learning-hub/releases), or download `main.js`, `manifest.json`, and `styles.css` separately.
-2. Create `.obsidian/plugins/learning-hub/` inside your vault. If you changed Obsidian's configuration directory, use that directory instead.
-3. Place the three files directly inside it, without an extra nested folder:
+## First use and configuration
 
-   ```text
-   <vault>/.obsidian/plugins/learning-hub/
-   ├── main.js
-   ├── manifest.json
-   └── styles.css
-   ```
+The plugin creates `Home.md`, `Courses/Courses.md`, schedule/task/retrospective entries under `学习系统/`, `Draft/`, and project and self-study entry notes. It creates a date-based semester with an empty course list.
 
-4. Restart Obsidian or reload the plugin list.
-5. Open **Settings → Community plugins**, allow community plugins, and enable **Learning Hub**.
-6. Click the learning workspace ribbon icon or run **Learning Hub: Open learning home**. The command label follows your selected interface language.
+Create semesters and courses in settings. Course codes use four letters, a space and four digits, optionally followed by a hyphenated suffix, for example `COMP 1001`. Upload your own Syllabus, review the Codex draft and confirm. Upload lecture PDFs from the course page to begin preview, note generation and review.
 
-Installation uses the bundled `main.js`. You do not need Python, npm dependencies, or source modules. GitHub's automatically generated source ZIP differs from the installation ZIP; use the explicitly named installation package.
-
-### Using BRAT
-
-If BRAT is installed, add `haoyuanzhang2007/obsidian-learning-hub` and enable Learning Hub. The release tag is `1.0.0`, exactly matching the manifest version. A GitHub release does not by itself make the plugin available in Obsidian's official community directory; this README does not assume community review has been completed.
-
-See the [official Obsidian publishing documentation](https://docs.obsidian.md/Plugins/Releasing/Submit%20your%20plugin) for release asset requirements.
-
-## First use
-
-### 1. Open the learning home
-
-First activation creates missing entry files and preserves existing notes with the same names. It creates a default semester based on the current date, with zero courses. You can immediately add tasks, create drafts, open the schedule, and adjust settings without connecting AI.
-
-```text
-<vault>/
-├── Home.md
-├── Courses/
-│   ├── Courses.md
-│   └── Self Study/Self Study.md
-├── 学习系统/
-│   ├── 完整日程.md
-│   ├── 待办.md
-│   └── 复盘.md
-├── Projects/Projects.md
-├── Draft/
-├── Learning Hub Guide.md
-└── .learning-hub/                 # Hidden runtime data created after activation
-```
-
-The Chinese folder and note names shown above are the actual default paths in both interface languages: the schedule, tasks, and retrospective live under `学习系统/`. `Home.md` and the other entry notes open the plugin's native learning pages. Course notes, uploaded materials, and handwritten content remain ordinary vault files that can be opened independently.
-
-### 2. Create semesters and courses
-
-Open **Semesters and courses** in Learning Hub settings:
-
-1. Use the default semester or create one such as `2027 Spring`.
-2. Click **Create course** and select its semester.
-3. Enter a code and name, such as `COMP 1001` and `Introduction to Computing`. Version 1.0.0 requires **four letters, a space, and four digits**, with an optional hyphenated suffix.
-4. The plugin creates the course folder, index, learning entry note, and blank syllabus template.
-5. Open the course from the sidebar. You can upload a syllabus and parse it with Codex; the generated overview is written only after you review and confirm it.
-
-A course overview describes the whole syllabus. Each L01, L02, and subsequent lecture has its own learning page. Creating a blank syllabus template does not parse its contents automatically.
-
-### 3. Create your first lecture
-
-Use **Upload materials** on the course page to create a lecture. After uploading text-based PDFs, the plugin can combine all PDFs for that lecture into preparation content. You can add materials, switch PDFs, and change the displayed lecture title. Original materials remain in the lecture folder.
-
-Check each preparation concept before generating a main-note draft. Generation displays its stage, elapsed time, received content, and available reasoning summaries. Confirm before writing to the lecture note. Recall and review follow **answer → reveal → self-assess**.
-
-## Configure Codex
-
-Codex handles syllabus analysis, preparation, main notes, questions, and other structured generation. The plugin starts local `codex app-server` and uses your local Codex authentication and configuration.
-
-1. Install the CLI using the [official Codex CLI documentation](https://developers.openai.com/codex/cli), for example:
-
-   ```bash
-   npm install -g @openai/codex
-   codex
-   ```
-
-2. Start Codex in a terminal and complete your own sign-in. Check that `codex --version` and `codex app-server --help` run successfully.
-3. Set **Codex executable** in Learning Hub. The default is `codex`. If a desktop-launched Obsidian cannot find it, use the absolute path returned by `command -v codex`. On Windows, use `where codex` and select a directly executable program path.
-4. Read the model list and select a model and reasoning effort available to your account. A returned model catalog does not guarantee inference permission; an actual request determines availability.
-5. Concurrency defaults to **2** and can be set to **1–4**. Additional tasks wait in a queue.
-
-Codex requests use a `read-only` sandbox and `never` approval policy. The plugin writes structured content after review; the model does not directly modify the vault through tools. Codex manages its own authentication credentials, which are not included in the installation package.
-
-Large requests remain subject to model context windows, service output limits, and request timeouts. Preparation generation waits up to eight minutes; service errors are shown in the interface.
-
-## Configure DeepSeek
-
-Enter your own settings under **DeepSeek API · Shared across the plugin**:
-
-| Setting | Meaning |
+| Service | Responsibility and setup |
 | --- | --- |
-| API endpoint | A complete HTTPS Chat Completions URL; defaults to `https://api.deepseek.com/chat/completions` |
-| API Key | Your service credential; initially empty |
-| Default model | One of the provided DeepSeek options; actual availability depends on the service |
-| Reasoning effort | Fast mode or the reasoning options supported by the selected model |
-| Assistant language | The language used for the learning assistant and explanations |
+| Codex | Syllabus, lesson content, questions, homework/practice parsing, estimates and schedule generation. Install and sign into your own Codex CLI; verify `codex app-server` and configure the executable, model, effort and concurrency |
+| DeepSeek | Assistant, task edits, schedule adjustments, time-rule conversations, selection explanations and optional draft titles/vault-guide edits. Configure your HTTPS Chat Completions endpoint and API key |
+| PDF extraction | Install Poppler's `pdftotext`; common locations and process PATH are searched, or set an absolute executable path. OCR scanned PDFs first |
 
-One API key serves the learning assistant, task intake, availability conversations, draft titles, selection explanations, and vault guide. Advanced settings for selection explanations and the vault guide can select a model; when unset, they use the shared default. For a custom endpoint, check compatibility with the plugin's request format and model names.
+The Codex executable defaults to `codex`. If desktop Obsidian cannot find it, set its actual path. Model access depends on your account. Codex requests use read-only execution with no tool approvals; the plugin handles validation and persistence.
 
-The assistant includes the current Markdown or extractable PDF, selected text, and course context. Type `@` to reference vault files; references can be removed before sending. It supports follow-up questions, stopping generation, restoring conversations, and inspecting token usage. CNY costs are estimates: built-in prices are a release-time snapshot and can be refreshed in settings. Custom endpoints do not use official price estimates. See [DeepSeek's official pricing](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/).
+The default DeepSeek endpoint is `https://api.deepseek.com/chat/completions`; the key starts empty. Custom services must support the request format. Costs are estimates, with configurable pricing; custom endpoints do not use official prices automatically.
 
-Automatic draft titles apply only to nonempty drafts in `Draft/` that still have timestamp names. **Automatic AI revision of the vault guide is disabled by default**; enable it explicitly or run it manually.
+References: [Codex CLI](https://developers.openai.com/codex/cli), [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/).
 
-## Configure PDF text extraction
+## Homework, Tutorial and Lab
 
-Install Poppler and make sure `pdftotext` runs:
+Choose a category in the materials library and upload your own resources. Tutorial / Lab packs can combine multiple files, assign per-file roles, link a lesson, enable review references and optionally create a task. No sample files are automatically imported.
 
-- macOS with Homebrew: `brew install poppler`
-- Debian or Ubuntu Linux: `sudo apt install poppler-utils`
-- Windows: install a suitable Poppler build and enter the absolute path to `pdftotext.exe` in plugin settings.
+Parsing separates parent questions, individual subquestions, provided answers, code templates and page/cell references. Notebooks are read as text with saved plain-text outputs; **code is never executed**. Open code exercises in your associated local editor. Answers are collapsed in detail pages, and incomplete templates remain incomplete.
 
-The plugin searches common locations and the process `PATH`. Obsidian launched from the desktop may not inherit the terminal's full `PATH`; enter an absolute path under **PDF text extractor** if needed. Scanned PDFs require OCR. Uploading an image-based PDF successfully does not mean its text was extracted.
+Review generation and assistant context include linked lesson resources and eligible course-level resources. Unlinked content is not presented as a lecture source. Read failures, conflicting sources and uncertainty are retained. Changing file roles makes the old analysis stale and requires reanalysis.
 
-## Tasks, scheduling, and retrospective
+Estimates update linked tasks, while manual estimates take priority and existing completion, urgency and pin states are preserved. Homework and Tutorial support parent or subquestion mistakes without duplicate records. Lab supports practice progress and notes.
 
-- Manual tasks require only a title. You can add a description, deadline, course or lecture, and pinning state.
-- AI task intake first presents an editable list; review each item before saving.
-- Setting an assignment deadline creates a linked task and includes it in rolling scheduling.
-- Set weekly study availability and rest periods on the full schedule page; add fixed classes or meetings in settings.
-- The local rolling schedule updates around the next seven days using availability, fixed commitments, calendar blocks, and deadlines.
-- Record on-time completion, late completion, or noncompletion. Linked tasks and schedule entries share their completion state.
-- Meal and study conflicts appear during review of AI schedule drafts.
-- The retrospective displays recent completion heatmaps, daily details, and actual time spent.
+## Time rules and scheduling
 
-Initial availability is 08:00–22:00 every day. Adjust it to your actual routine. The default timezone comes from your machine.
+Initial study availability is 08:00–22:00 daily, with the local machine timezone. Configure your actual waking, sleep, study windows and rest first. A strict weekly profile can define precise meal times, activities and date-specific exceptions.
 
-## Optional: Google Calendar
+- All LEC events are required; TUT / LAB attendance is opt-in, with recurring rules available.
+- Lunch and dinner reserve an hour each. Exercise aims for an hour including showering; enabled strict profiles supply exact boundaries.
+- DeepSeek conversations configure available/unavailable periods or full/partial rest. Preview and confirm rules; confirmed schedules are not silently replanned.
+- Codex plans unconfirmed dates in the next seven days around availability, busy events and task priority. Urgency affects priority; pins do not.
+- DeepSeek schedule conversations can remove, replace or move items. Conflict checks and date selection precede confirmation.
+- The task overview shows seven days of project and learning tasks. The three-day calendar includes complete routines and rest, with a wider selected day.
+- There is no automatic rolling replan. Tasks that cannot fit remain unscheduled instead of occupying protected time.
 
-Calendar synchronization is read-only. Events provide busy periods, course reminders, and scheduling constraints. The plugin does not create, edit, or delete Google Calendar events.
+## Optional Google Calendar
 
-1. Enable Google Calendar API in your own [Google Cloud project](https://console.cloud.google.com/).
-2. Configure the OAuth consent screen and add your test account if the app is in testing.
-3. Create a **Desktop app** OAuth client.
-4. Enter the Client ID in plugin settings, and the Client Secret if your client requires it.
-5. Click **Connect Google Calendar** and complete read-only authorization in the system browser.
-6. Select the calendars to synchronize. Manual synchronization is available; the running plugin also synchronizes periodically.
+Synchronization is read-only: no events are added, edited or deleted. Enable Calendar API in your own Google Cloud project, create a Desktop app OAuth client, configure Client ID and any required Client Secret, authorize from the plugin and select calendars. Test-mode accounts must be listed, and expired authorization may require reconnecting.
 
-See [Google's official desktop quickstart](https://developers.google.com/workspace/calendar/api/quickstart/nodejs). Testing-mode authorization may expire, requiring reconnection. Each installer establishes their own connection; the plugin does not inherit calendar authorization from other applications.
-
-Calendar titles containing `[LEC]`, `[TUT]`, and `[LAB]` identify course events. LEC and other busy events block time; you can choose attendance for individual TUT and LAB events.
+See [Google's desktop setup guide](https://developers.google.com/workspace/calendar/api/quickstart/nodejs). The plugin does not inherit another application's authorization.
 
 ## Data and privacy
 
-The installation directory contains program files only. After activation, settings and runtime state are created under **the current vault's `.learning-hub/` directory**, outside the plugin installation folder.
+The repository and install package include no personal notes, materials, tasks, timetable, chat history, API keys, OAuth clients or authorization tokens. Settings, learning state and conversations live in the current vault's hidden `.learning-hub/` directory; preserve it when upgrading.
 
-```text
-.learning-hub/
-├── plugin-data/           # Settings, shared API key, calendar authorization, integrated feature state
-├── conversations.json    # Assistant conversation history
-└── vault-data/            # Hidden course state and annotations organized by relative note/course path
-```
+Hidden files are not an encrypted credential store and may still synchronize. Manage your vault synchronization scope explicitly.
 
-- Release assets contain no configured API keys, OAuth clients, authorization tokens, personal notes, courses, tasks, or conversations.
-- API keys and calendar tokens are local settings created when you enable their features. This directory is **not an encrypted credential vault**. Hidden folders do not automatically prevent synchronization; choose your vault's synchronization scope explicitly.
-- AI requests send selected materials, page text, selected text, references, or relevant task context to the configured service. If vault-guide AI revision is enabled, it sends directory information, Markdown samples, and change records.
-- Calendar synchronization accesses Google directly. Codex requests go through the local CLI. DeepSeek requests go to your configured endpoint.
-- The plugin includes no telemetry, analytics tracking, or maintainer data collection endpoint.
+AI requests send selected material, page content, references or relevant task context to the configured services. Notebook code is not executed, and Google synchronization is read-only. Vault-guide automatic AI maintenance defaults to off. There is no telemetry or maintainer data-collection endpoint.
 
-## Troubleshooting
+## Build from source
 
-| Problem | What to check |
-| --- | --- |
-| Plugin missing from the list | Check the `learning-hub` folder name and that all three files are directly inside it; restart Obsidian |
-| No courses after installation | This is the initial state; create your own courses in settings |
-| Codex not found | Confirm CLI installation in a terminal and enter its absolute executable path |
-| Model list works but generation fails | Check Codex authentication, account permissions, model configuration, network, and the returned error |
-| DeepSeek returns 401 or 403 | Check your key, endpoint, account state, and model access |
-| No extractable PDF text | Check `pdftotext`, its path, and whether the PDF needs OCR |
-| Assignment shows only a summary | Click **View details**; long questions are collapsed by default |
-| Tasks are not scheduled | Check task state, dates, availability, rest periods, and busy blocks |
-| Calendar connection fails | Check the desktop OAuth client, test account, Client Secret, and consent screen |
-| Existing notes did not change after switching language | Language settings affect the interface or subsequent generated content |
-
-When reporting an issue, include the plugin version, Obsidian version, reproduction steps, and sanitized errors. Do not submit `.learning-hub/`, API keys, calendar tokens, or personal materials.
-
-## Develop from source
-
-`plugin.js` is the source entrypoint, with separate features in `modules/`. Root `main.js` is the bundled installation entrypoint; do not edit it directly.
+Edit `plugin.js` and `modules/`, not the bundled root `main.js`.
 
 ```bash
 python3 build.py
 python3 scripts/package-release.py
 ```
 
-- Building uses only the Python standard library; no npm dependency installation is required.
-- `build.py` bundles local modules into root `main.js` and `dist/main.js`.
-- `package-release.py` packages only `main.js`, `manifest.json`, and `styles.css`.
-- GitHub Actions builds the plugin. The repository maintainer publishes releases using their own GitHub account.
+The build uses only the Python standard library and writes root and `dist/` entrypoints. The install ZIP contains exactly `main.js`, `manifest.json` and `styles.css`. GitHub Actions checks the build; releases are published by the maintainer's account.
 
-Modules cover Codex, DeepSeek streaming, course and lecture generation, assignments, calendars, scheduling, chat, annotations, progress, and hidden runtime storage.
+## Limits
 
-## Limitations
+Desktop only. PPT/PPTX can be archived but is not parsed; scanned PDFs require OCR. Network, permissions, context limits and timeouts can affect generation. AI output needs review. Syllabus, previews, main notes, review questions and AI schedules have draft-confirmation workflows; homework/practice analysis and linked tasks can be generated automatically. Successful upload does not guarantee successful AI parsing.
 
-- Obsidian desktop only.
-- Syllabus and lab workflows support PDF, Markdown, and TXT. Automatic lecture preparation primarily uses text-based PDFs.
-- OCR and PowerPoint text extraction are not implemented.
-- Large inputs, model capability, network conditions, and service limits can cause generation to fail.
-- Email and Linear integrations are not implemented.
-- Review AI output. Preparation, main notes, review questions, syllabus analysis, and AI schedules retain draft confirmation steps.
-
-See [CHANGELOG.md](CHANGELOG.md) for version changes.
+Report issues with versions, reproduction steps and sanitized errors. Do not submit runtime data or credentials.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE). Copyright (c) 2026 haoyuanzhang2007.
+[MIT](LICENSE) · Copyright (c) 2026 haoyuanzhang2007.

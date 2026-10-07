@@ -13,8 +13,11 @@ function mergeGeneratedPreview(previous = {}, generated, idFactory) {
   return {
     ...previous,
     description: String(generated.description || previous.description || '').trim(),
+    ...(generated.guide?{guide:generated.guide}:{}),
     summary: generated.summary,
     objectives: generated.objectives,
+    estimatedMinutes: Number(generated.estimatedMinutes)>0?generated.estimatedMinutes:previous.estimatedMinutes,
+    estimatedConceptCount: Number(generated.estimatedMinutes)>0?(Number(generated.estimatedConceptCount)>0?generated.estimatedConceptCount:generated.concepts.length):previous.estimatedConceptCount,
     concepts: generated.concepts.map(item => {
       const found = old.get(item.title.trim().toLocaleLowerCase());
       return { id: found?.id || idFactory(), ...item, status: found?.status || null, note: found?.note || '' };
@@ -26,6 +29,7 @@ function legacyPreviewDraft(draft, idFactory) {
   const summary = Array.isArray(draft.summary) ? draft.summary : String(draft.objectives || '').split(/\n+/).map(value => value.trim()).filter(Boolean);
   return {
     description: String(draft.description || summary.slice(0, 2).join(' ')),
+    ...(draft.guide?{guide:draft.guide}:{}),
     summary,
     objectives: String(draft.objectives || summary.join('\n')),
     concepts: (draft.concepts || []).map(item => ({ id: idFactory(), group: item.group || '本讲要点', title: item.title, summary: item.summary, status: null, note: '' })),

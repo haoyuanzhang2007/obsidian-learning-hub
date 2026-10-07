@@ -17,5 +17,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 build.py
-      - run: node --check main.js
-      - run: git diff --exit-code -- main.js
+      - name: Check JavaScript entrypoints and modules
+        run: |
+          node --check main.js
+          node --check plugin.js
+          for file in modules/*.js; do node --check "$file"; done
+      - run: git diff --exit-code -- main.js modules/obsidian-markdown-skill.js
+      - run: python3 scripts/package-release.py

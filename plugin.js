@@ -2,20 +2,26 @@ const {configureDateInput,validateTemporalInputs}=require('./modules/date-input'
 const { t: tr, translate, uiLocale, setInterfaceLanguage, normalizeInterfaceLanguage } = require('./modules/i18n');
 const {Plugin, ItemView, Modal, Notice, TFile, MarkdownView, MarkdownRenderer, requestUrl, setIcon, normalizePath} = require('obsidian');
 const path = require('path');
-const {generationLanguageInstruction}=require('./modules/generation-language');
+const {generationLanguageInstruction,systemLanguageInstruction}=require('./modules/generation-language');
+const {scheduleDaySummary}=require('./modules/schedule-day-summary');
+const {matchesClassAnchor,completeCalendarItems,isProjectItem,isRoutineItem,calendarCategory}=require('./modules/schedule-view-data');
+const {renderScheduleCalendar,updateCalendarClock}=require('./modules/schedule-calendar');
 const {CodexClient} = require('./modules/codex-client');
-const {formatCodexUsage,formatDeepSeekUsage} = require('./modules/token-usage');
+const {renderTokenUsage} = require('./modules/token-usage');
 const {extractPdfText, combineLectureSlides, previewSchema, previewPrompt, validatePreviewDraft} = require('./modules/lecture-ai');
 const {courseInitialSchema,courseInitialPrompt,validateCourseInitial,formatCourseInitial,mergeCourseInitialNote}=require('./modules/course-initial');
 const {previewGroups,mergeGeneratedPreview,legacyPreviewDraft,formatPreviewMarkdown}=require('./modules/preview-structure');
-const {buildScheduleRequest,validateScheduleDraft,acceptScheduleDraft}=require('./modules/schedule-ai');
-const {classifyCalendarEvent,matchCalendarCourse,calendarBlocks,estimateMinutes,taskStatus,scheduleItemState,retainPendingCalendarEvents,planIncrementally}=require('./modules/planning');
-const {completed,tasksForToday,recentDeadlineTasks,deadlineLabel,urgencyBand}=require('./modules/task-views');
+const {lessonGuideSchema,validateLessonGuideDraft,lessonGuidePrompt,displayLessonGuide}=require('./modules/lesson-guide');
+const {existingLessonStudyTasks,reconcileLearningTodos}=require('./modules/learning-todos');
+const {buildScheduleRequest,buildScheduleAdjustmentPrompt,scheduleAdjustmentSchema,validateScheduleDraft,acceptScheduleDraft}=require('./modules/schedule-ai');
+const {applyCalendarAttendanceRules,classifyCalendarEvent,matchCalendarCourse,calendarBlocks,estimateMinutes,taskStatus,scheduleItemState,retainPendingCalendarEvents,planIncrementally}=require('./modules/planning');
+const {completed,taskVisible,tasksForToday,recentDeadlineTasks,deadlineLabel,urgencyBand}=require('./modules/task-views');
 const {taskIntakePrompt,parseTaskIntake,validDate}=require('./modules/task-intake');
-const {WEEKDAYS,normalizeAvailability,normalizeRestBlocks,expandRestBlocks,availabilityPrompt,parseAvailabilityResponse}=require('./modules/study-availability');
-const {noteSchema,notePrompt,validateNoteDraft,questionsSchema,questionsPrompt,validateQuestions}=require('./modules/study-ai');
+const {WEEKDAYS,visibleRestBlocks,normalizeDateAvailability,normalizeRoutine,normalizeAvailability,normalizeRestBlocks,expandRestBlocks,availabilityPrompt,parseAvailabilityResponse}=require('./modules/study-availability');
+const {noteSchema,notePrompt,validateNoteDraft,questionsSchema,questionsPrompt,validateQuestions,validateEstimatedMinutes}=require('./modules/study-ai');
+const {flattenHomeworkQuestions,homeworkWrongPrompt}=require('./modules/homework-questions');
 const {organizeSchema,analyzeSchema,combineHomeworkTexts,organizeHomeworkPrompt,validateOrganizedHomework,analyzeHomeworkPrompt,validateHomeworkAnalysis}=require('./modules/homework-ai');
-const {labSchema,labPrompt,validateLabDraft}=require('./modules/lab-ai');
+const {materialKind,sourceRole,notebookText,practiceSchema,practicePrompt,validatePractice,practiceContext}=require('./modules/practice-materials');
 const {MISCONCEPTION_SYSTEM,misconceptionRequest,parseMisconception}=require('./modules/chat-error-ai');
 const {DEFAULT_PRICING,PRICING_URL,parseOfficialPricing}=require('./modules/deepseek-pricing');
 const {DEEPSEEK_ENDPOINT,DEFAULT_SYSTEM_PROMPT,createDeepSeekChatClient}=require('./modules/deepseek-chat');
@@ -23,7 +29,12 @@ const {createChatStore}=require('./modules/chat-store');
 const {CHAT_VIEW_TYPE,LearningChatView}=require('./modules/chat-view');
 const {normalizeGoogleState,localTimestamp,createGoogleCalendarClient}=require('./modules/google-calendar');
 const {normalizeSemesterLabel,semesterIdForName,semesterSortValue,parseSemesterCatalog}=require('./modules/semesters');
-const {normalizeDraftSettings,draftTimestamp,isTimestampDraft,draftParentFolder,draftTitleRequest,parseDraftTitle,uniqueDraftPath}=require('./modules/drafts');
+const {normalizeDraftSettings,draftTimestamp,isTimestampDraft,draftParentFolder,draftTitleRequest,parseDraftTitle,uniqueDraftPath,draftImportPath}=require('./modules/drafts');
+
+const {expandProfileActivities,enforceProfileSettings,normalizeRoutineExceptions}=require('./modules/schedule-profile');
+
+const {normalizeTaskOptions,isLongTerm,taskDurationLabel,compareTaskPriority}=require('./modules/task-options');
+const {collectCourseStudyTasks}=require('./modules/course-study-plan');
 
 const ROOT = 'Courses';
 const INDEX = `${ROOT}/Courses.md`;
@@ -56,14 +67,24 @@ const asFile = (app,path) => { const f=app.vault.getAbstractFileByPath(path); re
 class EntryModal extends Modal {
   constructor(app, title, fields, done, onDelete=null) { super(app); this.title=title; this.fields=fields; this.done=done; this.onDelete=onDelete; }
   onOpen() {
-    const el=this.contentEl; el.empty(); el.addClass('learning-hub-modal');
-    el.createEl('h2',{text:this.title}); const inputs={};
-    for(const f of this.fields){ const row=el.createDiv({cls:'lh-form-row'}); row.createEl('label',{text:f.label}); const input=f.options?row.createEl('select'):row.createEl(f.multiline?'textarea':'input',{attr:f.multiline?{placeholder:f.placeholder||''}:{type:f.type||'text',placeholder:f.placeholder||''}});if(f.options)for(const option of f.options)input.createEl('option',{text:option.label,attr:{value:option.value}}); if(f.value)input.value=f.value; configureDateInput(input);inputs[f.key]=input; }
+    const el=this.contentEl; el.empty(); el.addClass('learning-hub-modal');this.modalEl.addClass('lh-entry-shell');
+    el.createEl('h2',{text:this.title});if(this.fields.some(field=>field.key==='taskType'))el.addClass('lh-task-edit-form');const inputs={};
+    const rows={};
+    for(const f of this.fields){
+      const row=rows[f.key]=el.createDiv({cls:'lh-form-row',attr:{'data-field':f.key}});row.createEl('label',{text:f.label});
+      const input=f.options?row.createEl('select'):row.createEl(f.multiline?'textarea':'input',{attr:{type:f.type||'text',placeholder:f.placeholder||'',...(f.attrs||{})}});
+      input.setAttribute('aria-label',f.label);if(f.disabled)input.disabled=true;if(f.options)for(const option of f.options)input.createEl('option',{text:option.label,attr:{value:option.value}});
+      if(f.type==='checkbox')input.checked=!!f.value;else if(f.value!==undefined&&f.value!==null)input.value=String(f.value);
+      if(f.help)row.createDiv({text:f.help,cls:'lh-form-help'});
+      configureDateInput(input);inputs[f.key]=input;
+      if(f.onChange)input.onchange=()=>f.onChange(inputs,rows);
+    }
+    for(const f of this.fields)f.onChange?.(inputs,rows);
     const footer=el.createDiv({cls:'lh-confirm-actions'});
     if(this.onDelete){const remove=footer.createEl('button',{text:tr('删除待办'),cls:'lh-task-edit-delete'});remove.onclick=()=>new ConfirmModal(this.app,tr('删除此待办？'),tr('删除后，与此待办关联的日程安排会一并移除；历史完成记录会保留。'),tr('确认删除'),async()=>{await this.onDelete();this.close();}).open();}
     const cancel=footer.createEl('button',{text:tr('取消')});cancel.onclick=()=>this.close();
     const action=footer.createEl('button',{text:tr("保存"),cls:'mod-cta'});
-    action.onclick=async()=>{ if(!validateTemporalInputs(el))return;const values=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.value.trim()])); if(!values.title){new Notice(tr("请填写名称"));return;} if(await this.done(values)!==false)this.close(); };
+    action.onclick=async()=>{ if(!validateTemporalInputs(el))return;const values=Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v.type==='checkbox'?v.checked:v.value.trim()])); if(!values.title){new Notice(tr("请填写名称"));return;} action.disabled=true;try{if(await this.done(values)!==false)this.close();}catch(error){new Notice(tr('保存失败：{0}',[error.message]));}finally{if(action.isConnected)action.disabled=false;} };
   }
 }
 
@@ -99,27 +120,27 @@ class OutcomeModal extends Modal {
 }
 
 class TaskIntakeModal extends Modal {
-  constructor(plugin){super(plugin.app);this.plugin=plugin;this.history=[];this.messages=[];this.drafts=[];this.composerDraft='';this.busy=false;this.reviewing=false;this.closed=false;}
+  constructor(plugin,existing=null){super(plugin.app);this.plugin=plugin;this.existing=existing;this.originalTask=existing?JSON.stringify(existing):null;this.history=[];this.messages=[];this.drafts=existing?[structuredClone(existing)]:[];this.composerDraft='';this.busy=false;this.reviewing=false;this.closed=false;}
   onOpen(){
     this.modalEl.addClass('lh-task-intake-shell');
     this.contentEl.addClass('learning-hub-modal','lh-task-intake-modal');
     this.courses=this.plugin.coursesForSemester();
     this.lessonFiles=this.courses.flatMap(course=>this.plugin.lessons(course));
     this.lessons=this.lessonFiles.map(file=>file.path);
-    this.messages=[{role:'assistant',content:tr("告诉我你要完成哪些事，可以一次说多个。说明、DDL、课程或讲次会分别记录；没提到的字段会留空。")}];
+    this.messages=[{role:'assistant',content:this.existing?tr("正在修改「{0}」。告诉我需要改哪些信息，未提到的内容会保留，核对后再保存。",[this.existing.title]):tr("告诉我你要完成哪些事，可以一次说多个。说明、DDL、课程或讲次会分别记录；没提到的字段会留空。")}];
     this.render();
   }
   onClose(){this.closed=true;this.contentEl.empty();}
   render(){
     const root=this.contentEl;root.empty();
-    const head=root.createDiv({cls:'lh-intake-head'});head.createSpan({text:tr("DEEPSEEK · 待办录入"),cls:'lh-intake-kicker'});head.createEl('h2',{text:this.reviewing?tr("核对 {0} 项待办", [this.drafts.length]):tr("对话添加待办")});head.createEl('p',{text:this.reviewing?tr("逐项检查或删除。确认后才会一起加入待办。"):tr("可以一次说多个事项；只提取对话中明确的信息。")});
+    const head=root.createDiv({cls:'lh-intake-head'});head.createSpan({text:this.existing?tr("DEEPSEEK · 修改事项"):tr("DEEPSEEK · 待办录入"),cls:'lh-intake-kicker'});head.createEl('h2',{text:this.reviewing?(this.existing?tr("核对事项修改"):tr("核对 {0} 项待办", [this.drafts.length])):(this.existing?tr("对话修改事项"):tr("对话添加待办"))});head.createEl('p',{text:this.existing?tr("未提到的内容会保留。确认后更新这项待办。"):(this.reviewing?tr("逐项检查或删除。确认后才会一起加入待办。"):tr("可以一次说多个事项；只提取对话中明确的信息。"))});
     if(this.reviewing){this.renderReview(root);return;}
     const messages=root.createDiv({cls:'lh-intake-messages',attr:{role:'log','aria-label':tr("待办录入对话")}});
-    for(const message of this.messages){const bubble=messages.createDiv({cls:`lh-intake-message is-${message.role}`});bubble.createSpan({text:message.role==='user'?tr("你"):'DeepSeek',cls:'lh-intake-role'});bubble.createDiv({text:message.content,cls:'lh-intake-copy'});const usage=message.role==='assistant'&&Object.prototype.hasOwnProperty.call(message,'usage')?formatDeepSeekUsage(message.usage):'';if(usage)bubble.createDiv({text:usage,cls:'lh-intake-usage'});}
+    for(const message of this.messages){const bubble=messages.createDiv({cls:`lh-intake-message is-${message.role}`});bubble.createSpan({text:message.role==='user'?tr("你"):'DeepSeek',cls:'lh-intake-role'});bubble.createDiv({text:message.content,cls:'lh-intake-copy'});if(message.role==='assistant'&&message.usage)renderTokenUsage(bubble.createDiv({cls:'lh-intake-usage'}),message.usage,{provider:'DeepSeek'});}
     messages.scrollTop=messages.scrollHeight;
     if(this.drafts.length){const preview=root.createDiv({cls:'lh-intake-preview'});preview.createSpan({text:tr("当前草稿 · {0} 项", [this.drafts.length]),cls:'lh-intake-preview-label'});for(const [index,draft] of this.drafts.entries()){const item=preview.createDiv({cls:'lh-intake-preview-item'});item.createEl('strong',{text:`${index+1}. ${draft.title||tr("未命名事项")}`});item.createSpan({text:[draft.due?`${tr("截止")} ${draft.due}${draft.dueTime?` ${draft.dueTime}`:''}`:tr("未设置 DDL"),draft.course?.split(' - ')[0]||tr("未关联课程")].join(' · '),cls:'lh-intake-preview-meta'});}}
     const composer=root.createDiv({cls:'lh-intake-composer'});
-    const input=composer.createEl('textarea',{attr:{placeholder:this.plugin.state.deepseek.apiKey?tr("例如：周五 23:59 前提交机器学习作业第 2 题…"):tr("请先在插件设置中填写 DeepSeek API Key"),'aria-label':tr("描述要添加的待办")}});input.value=this.composerDraft;input.disabled=this.busy||!this.plugin.state.deepseek.apiKey;input.oninput=()=>{this.composerDraft=input.value;};input.onkeydown=event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();void this.send();}};
+    const input=composer.createEl('textarea',{attr:{placeholder:this.plugin.state.deepseek.apiKey?(this.existing?tr("例如：改为紧急，预计用时 90 分钟…"):tr("例如：周五 23:59 前提交机器学习作业第 2 题…")):tr("请先在插件设置中填写 DeepSeek API Key"),'aria-label':tr("描述要添加的待办")}});input.value=this.composerDraft;input.disabled=this.busy||!this.plugin.state.deepseek.apiKey;input.oninput=()=>{this.composerDraft=input.value;};input.onkeydown=event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();void this.send();}};
     const send=composer.createEl('button',{text:this.busy?tr("正在整理…"):tr("发送"),cls:'lh-intake-send'});send.disabled=this.busy||!this.plugin.state.deepseek.apiKey;send.onclick=()=>void this.send();
     const footer=root.createDiv({cls:'lh-intake-footer'});footer.createSpan({text:tr("⌘ / Ctrl + Enter 发送"),cls:'lh-intake-hint'});
     const cancel=footer.createEl('button',{text:tr("取消"),cls:'lh-intake-quiet'});cancel.onclick=()=>this.close();
@@ -130,9 +151,9 @@ class TaskIntakeModal extends Modal {
     if(!this.plugin.state.deepseek.apiKey){new Notice(tr("请先在 Learning Hub 设置中填写 DeepSeek API Key。"));return;}
     this.composerDraft='';this.messages.push({role:'user',content:question});this.busy=true;this.render();
     try{
-      const systemPrompt=`${taskIntakePrompt({date:today(),courses:this.courses,lessons:this.lessons})}\n当前已核对草稿列表：${JSON.stringify(this.drafts)}`;
-      const result=await this.plugin.callDeepSeek({user:question,history:this.history,systemPrompt,thinking:false,reasoningEffort:'none',maxTokens:Math.min(6000,1200+this.drafts.length*170)});
-      const parsed=parseTaskIntake(result.content,this.drafts,this.courses,this.lessons);
+      const systemPrompt=`${taskIntakePrompt({date:today(),courses:this.courses,lessons:this.lessons,mode:this.existing?'edit':'create'})}${this.existing?.learningManaged?'\n当前是自动学习任务：阶段、课程/讲次、taskType、due/dueTime由学习进度和课表管理，保持原值；可修改标题、说明、预计用时、urgent、pinned。':''}\n当前已核对草稿列表：${JSON.stringify(this.drafts)}`;
+      const result=await this.plugin.callDeepSeek({user:question,history:this.history,systemPrompt,languageScope:'system',thinking:false,reasoningEffort:'none',maxTokens:this.existing?6000:Math.min(6000,1200+this.drafts.length*170),responseFormat:{type:'json_object'}});
+      const parsed=parseTaskIntake(result.content,this.drafts,this.courses,this.lessons,{mode:this.existing?'edit':'create'});
       if(this.closed)return;
       this.history=result.history;this.drafts=parsed.drafts;this.messages.push({role:'assistant',content:parsed.reply,usage:result.usage});
     }catch(error){if(this.closed)return;console.error('Learning Hub task intake:',error);this.messages.push({role:'assistant',content:error.message||'暂时无法整理事项，请重试。'});}
@@ -143,74 +164,82 @@ class TaskIntakeModal extends Modal {
     const readers=[];
     this.drafts.forEach((draft,index)=>{
       const form=forms.createDiv({cls:'lh-intake-form'});
-      const top=form.createDiv({cls:'lh-intake-form-top'});top.createEl('strong',{text:tr("事项 {0}", [index+1])});const remove=top.createEl('button',{text:tr("删除此项"),cls:'lh-intake-remove'});remove.onclick=()=>{this.drafts=readers.map(read=>read());this.drafts.splice(index,1);this.render();};
+      const top=form.createDiv({cls:'lh-intake-form-top'});top.createEl('strong',{text:tr("事项 {0}", [index+1])});if(!this.existing){const remove=top.createEl('button',{text:tr("删除此项"),cls:'lh-intake-remove'});remove.onclick=()=>{this.drafts=readers.map(read=>read());this.drafts.splice(index,1);this.render();};}
       const field=(label,type,value,options)=>{const wrap=form.createDiv({cls:'lh-intake-field'});wrap.createEl('label',{text:label});const input=options?wrap.createEl('select'):wrap.createEl(type==='textarea'?'textarea':'input',{attr:type==='textarea'?{}:{type}});if(options)for(const option of options)input.createEl('option',{text:option.label,attr:{value:option.value}});configureDateInput(input);input.value=value||'';return input;};
       const title=field(tr("需要完成的事项"),'text',draft.title);
       const description=field(tr("详细说明（可选）"),'textarea',draft.description);
       const dates=form.createDiv({cls:'lh-intake-date-fields'});
       const dateField=dates.createDiv({cls:'lh-intake-field'});dateField.createEl('label',{text:tr("DDL 日期（可选）")});const due=dateField.createEl('input',{attr:{type:'date'}});configureDateInput(due);due.value=draft.due;
       const timeField=dates.createDiv({cls:'lh-intake-field'});timeField.createEl('label',{text:tr("DDL 时间（可选）")});const dueTime=timeField.createEl('input',{attr:{type:'time'}});dueTime.value=draft.dueTime;
+      const taskType=field(tr('持续方式'),'select',draft.taskType||'one-time',[{label:tr('单次任务'),value:'one-time'},{label:tr('长期项目（无预计结束时间）'),value:'long-term'}]);
+      const duration=field(tr('预计用时（分钟，可选；长期项目为每次投入）'),'number',draft.estimatedMinutes||'');duration.min='1';duration.placeholder=tr('留空由 AI 估计');
+      const updateType=()=>{const ongoing=taskType.value==='long-term';due.disabled=ongoing||!!this.existing?.learningManaged;dueTime.disabled=ongoing||!!this.existing?.learningManaged;if(ongoing){due.value='';dueTime.value='';}};taskType.onchange=updateType;updateType();
       const course=field(tr("关联课程（可选）"),'select',draft.course,[{label:tr("不关联课程"),value:''},...this.courses.map(value=>({label:value,value}))]);
       const lesson=field(tr("关联讲次（可选）"),'select',draft.lessonPath,[{label:tr("不关联讲次"),value:''},...this.lessonFiles.map(file=>({label:`${file.parent?.name||''} · ${file.basename}`,value:file.path}))]);
-      const pinRow=form.createEl('label',{cls:'lh-intake-pin'});const pinned=pinRow.createEl('input',{attr:{type:'checkbox'}});pinned.checked=!!draft.pinned;pinRow.createSpan({text:tr("在最近事项中置顶")});
-      readers.push(()=>({title:title.value.trim(),description:description.value.trim(),due:due.value,dueTime:dueTime.value,course:course.value,lessonPath:lesson.value,pinned:pinned.checked,source:'DeepSeek 对话'}));
+      if(this.existing?.learningManaged){taskType.disabled=true;course.disabled=true;lesson.disabled=true;form.createDiv({text:tr('阶段、日期和课程由学习进度自动维护。'),cls:'lh-flow-muted'});}
+      const urgentRow=form.createEl('label',{cls:'lh-intake-pin'});const urgent=urgentRow.createEl('input',{attr:{type:'checkbox'}});urgent.checked=!!draft.urgent;urgentRow.createSpan({text:tr('紧急 · 优先安排')});
+      const pinRow=form.createEl('label',{cls:'lh-intake-pin'});const pinned=pinRow.createEl('input',{attr:{type:'checkbox'}});pinned.checked=!!draft.pinned;pinRow.createSpan({text:tr("置顶关注 · 不影响排程优先级")});
+      readers.push(()=>({title:title.value.trim(),description:description.value.trim(),due:due.value,dueTime:dueTime.value,course:course.value,lessonPath:lesson.value,pinned:pinned.checked,urgent:urgent.checked,taskType:taskType.value,estimatedMinutes:duration.value,source:this.existing?.source||'DeepSeek 对话'}));
     });
     const readAll=()=>readers.map(read=>read());
-    const add=forms.createEl('button',{text:tr("＋ 新增一项"),cls:'lh-intake-add'});add.onclick=()=>{this.drafts=[...readAll(),{title:'',description:'',due:'',dueTime:'',course:'',lessonPath:'',pinned:false}];this.render();};
+    if(!this.existing){const add=forms.createEl('button',{text:tr("＋ 新增一项"),cls:'lh-intake-add'});add.onclick=()=>{this.drafts=[...readAll(),{title:'',description:'',due:'',dueTime:'',course:'',lessonPath:'',pinned:false}];this.render();};}
     const footer=root.createDiv({cls:'lh-intake-footer'});footer.createSpan({text:tr("保存前请检查 AI 提取的内容。"),cls:'lh-intake-hint'});
     const back=footer.createEl('button',{text:tr("返回对话"),cls:'lh-intake-quiet'});back.onclick=()=>{this.drafts=readAll();this.reviewing=false;this.render();};
-    const save=footer.createEl('button',{text:tr("确认添加 {0} 项", [this.drafts.length]),cls:'lh-intake-primary'});save.disabled=!this.drafts.length;save.onclick=async()=>{if(!validateTemporalInputs(root))return;save.disabled=true;try{const values=readAll();if(await this.plugin.saveTasks(values)){new Notice(tr("已添加 {0} 项待办", [values.length]));this.close();}else save.disabled=false;}catch(error){console.error('Learning Hub task save:',error);new Notice(tr("添加待办失败：{0}", [error.message]));save.disabled=false;}};
+    const save=footer.createEl('button',{text:this.existing?tr("确认修改"):tr("确认添加 {0} 项", [this.drafts.length]),cls:'lh-intake-primary'});save.disabled=!this.drafts.length;save.onclick=async()=>{if(!validateTemporalInputs(root))return;save.disabled=true;try{const values=readAll();let saved;if(this.existing){const current=this.plugin.state.tasks.find(task=>task.id===this.existing.id);if(!current||JSON.stringify(current)!==this.originalTask)throw new Error(tr("这项待办已被修改或删除，请重新打开后再调整。"));saved=await this.plugin.saveTask(values[0],current);}else saved=await this.plugin.saveTasks(values);if(saved){new Notice(this.existing?tr("已修改待办"):tr("已添加 {0} 项待办", [values.length]));this.close();}else save.disabled=false;}catch(error){console.error('Learning Hub task save:',error);new Notice(tr("添加待办失败：{0}", [error.message]));save.disabled=false;}};
   }
 }
 
 class StudyAvailabilityModal extends Modal {
   constructor(plugin){
-    super(plugin.app);this.plugin=plugin;this.history=[];this.messages=[];this.composerDraft='';this.busy=false;this.ready=false;this.closed=false;
+    super(plugin.app);this.plugin=plugin;this.history=[];this.messages=[];this.composerDraft='';this.busy=false;this.ready=false;this.closed=false;this.logLabelId=`lh-rule-chat-${crypto.randomUUID()}`;
     const availability=plugin.state.ai?.availability;
     this.initialAvailability=Array.isArray(availability)?availability.map(row=>({day:Number(row.day),start:String(row.start||''),end:String(row.end||'')})):[];
     this.proposed=this.initialAvailability.map(row=>({...row}));
     this.initialRestBlocks=normalizeRestBlocks(plugin.state.ai?.restBlocks||[]);
-    this.proposedRestBlocks=this.initialRestBlocks.map(row=>({...row,days:row.days?[...row.days]:undefined}));
+    this.initialDateAvailability=structuredClone(plugin.state.ai.dateAvailability||[]);this.proposedDateAvailability=structuredClone(this.initialDateAvailability);
+    this.initialRoutine=structuredClone(plugin.state.ai.dailyRoutine||{});this.proposedRoutine=structuredClone(this.initialRoutine);
+    this.initialRoutineExceptions=structuredClone(plugin.state.ai.routineExceptions||[]);this.proposedRoutineExceptions=structuredClone(this.initialRoutineExceptions);
+    this.proposedRestBlocks=structuredClone(this.initialRestBlocks);
   }
   onOpen(){
-    this.modalEl.addClass('lh-availability-shell');
+    this.plugin.availabilityModal=this;this.modalEl.addClass('lh-availability-shell');
     this.contentEl.addClass('learning-hub-modal','lh-availability-modal');
-    this.messages=[{role:'assistant',content:tr("告诉我每周可学习的时间，也可以说哪些日期或时段休息。我会整理成可核对的安排；点击应用后才保存并更新滚动日程。")}];
+    this.messages=[{role:'assistant',content:tr("可以告诉我哪天休息或哪些时段可用，我会先整理成预览。")}];
     this.render();
   }
-  onClose(){this.closed=true;this.contentEl.empty();}
+  onClose(){this.closed=true;if(this.plugin.availabilityModal===this)this.plugin.availabilityModal=null;this.contentEl.empty();}
   render(){
     const root=this.contentEl;root.empty();
-    const head=root.createDiv({cls:'lh-intake-head'});head.createSpan({text:tr("DEEPSEEK · 时间安排"),cls:'lh-intake-kicker'});head.createEl('h2',{text:tr("设置可学习时间与休息安排")});head.createEl('p',{text:tr("告诉我每周可学习的时间，也可以说哪些日期或时段休息。我会整理成可核对的安排；点击应用后才保存并更新滚动日程。")});
-    if(!this.plugin.state.deepseek.apiKey)root.createDiv({text:tr("请先在 Learning Hub 设置中填写统一的 DeepSeek API Key。"),cls:'lh-availability-key-notice'});
-    const messages=root.createDiv({cls:'lh-intake-messages',attr:{role:'log','aria-label':tr("可学习时间与休息安排对话")} });
-    for(const message of this.messages){
-      const bubble=messages.createDiv({cls:`lh-intake-message is-${message.role}`});bubble.createSpan({text:message.role==='user'?tr("你"):'DeepSeek',cls:'lh-intake-role'});bubble.createDiv({text:message.content,cls:'lh-intake-copy'});
-      const usage=message.role==='assistant'&&Object.prototype.hasOwnProperty.call(message,'usage')?formatDeepSeekUsage(message.usage):'';if(usage)bubble.createDiv({text:usage,cls:'lh-intake-usage'});
+    const head=root.createDiv({cls:'lh-availability-head'}),heading=head.createDiv({cls:'lh-availability-heading'});
+    heading.createDiv({text:tr('日程设置'),cls:'lh-intake-kicker'});heading.createEl('h2',{text:tr('时间规则')});heading.createEl('p',{text:tr('用对话设置学习时段和休息日，核对后应用。')});head.createSpan({text:'DeepSeek',cls:'lh-availability-provider'});
+    if(!this.plugin.state.deepseek.apiKey)root.createDiv({text:tr('请先在 Learning Hub 设置中填写统一的 DeepSeek API Key。'),cls:'lh-availability-key-notice'});
+    const board=root.createDiv({cls:'lh-availability-board'}),chat=board.createDiv({cls:'lh-availability-chat'});
+    const chatHead=chat.createDiv({cls:'lh-availability-chat-head'});chatHead.createEl('h3',{text:tr('与 AI 对话'),attr:{id:this.logLabelId}});chatHead.createSpan({text:tr('支持连续调整')});
+    const messages=chat.createDiv({cls:'lh-intake-messages',attr:{role:'log','aria-live':'polite','aria-relevant':'additions text','aria-labelledby':this.logLabelId}});
+    if(!this.messages.some(message=>message.role==='user')){
+      const welcome=messages.createDiv({cls:'lh-availability-welcome'});setIcon(welcome.createDiv({cls:'lh-availability-welcome-icon'}),'sliders-horizontal');welcome.createEl('h3',{text:tr('按你的节奏安排学习')});welcome.createEl('p',{text:tr('告诉我哪天休息、哪个时段可用，或需要怎样调整作息。')});
+      const examples=welcome.createDiv({cls:'lh-availability-examples'});for(const text of ['今天休息','明天下午不可用','周五启用晚间学习']){const button=examples.createEl('button',{text:tr(text),attr:{type:'button'}});button.disabled=this.busy||!this.plugin.state.deepseek.apiKey;button.onclick=()=>{this.composerDraft=tr(text);this.render();this.contentEl.querySelector('textarea')?.focus();};}
+    }else for(const message of this.messages){
+      const bubble=messages.createDiv({cls:`lh-intake-message is-${message.role}`});bubble.createSpan({text:message.role==='user'?tr('你'):'DeepSeek',cls:'lh-intake-role'});const copy=bubble.createDiv({cls:'lh-intake-copy'});
+      if(message.role==='assistant'){copy.addClass('markdown-rendered');void this.plugin.renderPreviewMarkdown(copy,message.content,{path:''}).then(()=>{if(messages.isConnected)messages.scrollTop=messages.scrollHeight;});}else copy.setText(message.content);
+      if(message.role==='assistant'&&message.usage)renderTokenUsage(bubble.createDiv({cls:'lh-intake-usage'}),message.usage,{provider:'DeepSeek'});
     }
+    if(this.busy){const pending=messages.createDiv({cls:'lh-availability-pending',attr:{role:'status'}});pending.createSpan({cls:'lh-analysis-spinner'});pending.createSpan({text:tr('正在整理时间规则…')});}
     messages.scrollTop=messages.scrollHeight;
-    const preview=root.createDiv({cls:'lh-availability-preview'});const previewHead=preview.createDiv({cls:'lh-availability-preview-head'});previewHead.createEl('strong',{text:tr("周时段预览")});previewHead.createSpan({text:this.ready?tr("AI 已整理 · 请核对后应用"):tr("AI 修改后会显示在这里")});
-    const grid=preview.createDiv({cls:'lh-availability-grid'});
-    for(const day of [1,2,3,4,5,6,0]){
-      const item=grid.createDiv({cls:'lh-availability-day'});item.createSpan({text:tr(WEEKDAYS[day]),cls:'lh-availability-day-name'});
-      const windows=this.proposed.filter(row=>row.day===day),list=item.createDiv({cls:'lh-availability-windows'});
-      if(windows.length)for(const window of windows)list.createSpan({text:`${window.start}–${window.end}`,cls:'lh-availability-chip'});
-      else list.createSpan({text:tr("未设置"),cls:'lh-availability-empty'});
-    }
-    const rests=preview.createDiv({cls:'lh-availability-rest-list'});rests.createEl('strong',{text:tr("休息安排")});
-    if(!this.proposedRestBlocks.length)rests.createSpan({text:tr("暂无额外休息安排"),cls:'lh-availability-empty'});
-    for(const block of this.proposedRestBlocks){
-      const when=block.date||block.days.map(day=>tr(WEEKDAYS[day])).join('、');
-      const time=block.allDay?tr("全天休息"):tr("{0}–{1} 休息",[block.start,block.end]);
-      rests.createSpan({text:`${when} · ${time}`,cls:'lh-availability-rest-chip'});
-    }
-    if(!this.proposed.length)preview.createDiv({text:tr("至少保留一个每周可学习时段，才能安排滚动日程。"),cls:'lh-availability-warning'});
-    const composer=root.createDiv({cls:'lh-intake-composer'});
-    const input=composer.createEl('textarea',{attr:{placeholder:this.plugin.state.deepseek.apiKey?tr("例如：每周一到周五晚上 7 点到 10 点可以学习，10 月 10 日休息…"):tr("请先在插件设置中填写 DeepSeek API Key"),'aria-label':tr("描述可学习时间和休息安排")} });input.value=this.composerDraft;input.disabled=this.busy||!this.plugin.state.deepseek.apiKey;input.oninput=()=>{this.composerDraft=input.value;};input.onkeydown=event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();void this.send();}};
-    const send=composer.createEl('button',{text:this.busy?tr("正在整理…"):tr("发送"),cls:'lh-intake-send'});send.disabled=this.busy||!this.plugin.state.deepseek.apiKey;send.onclick=()=>void this.send();
-    const footer=root.createDiv({cls:'lh-intake-footer'});footer.createSpan({text:!this.plugin.state.deepseek.apiKey?tr("先在设置中填写统一的 DeepSeek API Key。"):tr("预览不会自动保存；确认后才应用并更新未来 7 天的滚动日程。"),cls:'lh-intake-hint'});
-    const cancel=footer.createEl('button',{text:tr("取消"),cls:'lh-intake-quiet'});cancel.onclick=()=>this.close();
-    const apply=footer.createEl('button',{text:tr("应用时间安排"),cls:'lh-intake-primary'});apply.disabled=this.busy||!this.ready||!this.proposed.length;apply.onclick=()=>void this.apply();
+    const composer=chat.createDiv({cls:'lh-intake-composer'});
+    const input=composer.createEl('textarea',{attr:{placeholder:this.plugin.state.deepseek.apiKey?tr('例如：今天休息，明天 14:00–16:00 不可用…'):tr('请先在插件设置中填写 DeepSeek API Key'),'aria-label':tr('描述可学习时间和休息安排')}});input.value=this.composerDraft;input.disabled=this.busy||!this.plugin.state.deepseek.apiKey;input.oninput=()=>{this.composerDraft=input.value;};input.onkeydown=event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();void this.send();}};
+    const send=composer.createEl('button',{text:tr('发送'),cls:'lh-intake-send',attr:{type:'button'}});setIcon(send.createSpan(),'arrow-up');send.disabled=this.busy||!this.plugin.state.deepseek.apiKey;send.onclick=()=>void this.send();chat.createDiv({text:tr('⌘ / Ctrl + Enter 发送'),cls:'lh-availability-composer-hint'});
+    const preview=board.createDiv({cls:'lh-availability-preview'}),previewHead=preview.createDiv({cls:'lh-availability-preview-head'});previewHead.createEl('h3',{text:tr('规则预览')});previewHead.createSpan({text:this.ready?tr('待应用'):this.messages.some(message=>message.role==='user')?tr('继续确认'):tr('当前规则'),cls:this.ready?'is-ready':''});
+    const scroll=preview.createDiv({cls:'lh-availability-preview-scroll'});
+    if(this.plugin.state.ai.scheduleProfile){const source=scroll.createDiv({cls:'lh-availability-source'});setIcon(source.createSpan(),'file-text');source.createSpan({text:this.plugin.state.ai.scheduleProfile.name});}
+    const week=scroll.createDiv({cls:'lh-availability-section'});week.createEl('h4',{text:tr('每周学习时段')});const grid=week.createDiv({cls:'lh-availability-grid'});
+    for(const day of [1,2,3,4,5,6,0]){const item=grid.createDiv({cls:'lh-availability-day',attr:{'data-day':String(day)}});item.createSpan({text:tr(WEEKDAYS[day]),cls:'lh-availability-day-name'});const windows=this.proposed.filter(row=>row.day===day),list=item.createDiv({cls:'lh-availability-windows'});if(windows.length)for(const window of windows)list.createSpan({text:`${window.start}–${window.end}`,cls:'lh-availability-chip'});else list.createSpan({text:tr('未设置'),cls:'lh-availability-empty'});}
+    const rests=scroll.createDiv({cls:'lh-availability-section lh-availability-rest-list'});rests.createEl('h4',{text:tr('休息安排')});if(!this.proposedRestBlocks.length)rests.createSpan({text:tr('暂无额外休息安排'),cls:'lh-availability-empty'});
+    for(const block of this.proposedRestBlocks){const when=block.date||block.days.map(day=>tr(WEEKDAYS[day])).join('、'),time=block.allDay?tr('全天休息'):tr('{0}–{1} 休息',[block.start,block.end]);const row=rests.createDiv({cls:'lh-availability-rule-row'});row.createSpan({text:when});row.createSpan({text:time,cls:'lh-availability-rest-chip'});}
+    if(this.proposedDateAvailability.length){const dates=scroll.createDiv({cls:'lh-availability-section'});dates.createEl('h4',{text:tr('指定日期')});for(const row of this.proposedDateAvailability){const item=dates.createDiv({cls:'lh-availability-rule-row'});item.createSpan({text:row.date});item.createSpan({text:`${row.start}–${row.end} · ${row.available?tr('可用'):tr('不可用')}`});}}
+    const routine=scroll.createEl('details',{cls:'lh-availability-routine'});routine.createEl('summary',{text:tr('作息与日期例外')});const times=routine.createDiv({cls:'lh-availability-routine-times'});for(const [label,value] of [[tr('起床'),this.proposedRoutine.wakeTime],[tr('睡觉'),this.proposedRoutine.sleepTime]]){const item=times.createDiv();item.createSpan({text:label});item.createEl('strong',{text:value||tr('待设定')});}for(const row of this.proposedRoutineExceptions)routine.createDiv({text:`${row.date} · ${row.sleepTime}–${row.wakeTime}`,cls:'lh-availability-routine-exception'});
+    if(!this.proposed.length)scroll.createDiv({text:tr('当前没有每周学习时段，可通过对话添加周时段或指定日期时段。'),cls:'lh-availability-warning'});
+    const footer=root.createDiv({cls:'lh-intake-footer'});footer.createSpan({text:tr('确认后保存规则，已确认日程保持原有安排。'),cls:'lh-intake-hint'});const cancel=footer.createEl('button',{text:tr('取消'),cls:'lh-intake-quiet'});cancel.onclick=()=>this.close();const apply=footer.createEl('button',{text:tr('应用时间安排'),cls:'lh-intake-primary'});apply.disabled=this.busy||!this.ready;apply.onclick=()=>void this.apply();
   }
   async send(){
     const question=this.composerDraft.trim();if(!question||this.busy)return;
@@ -218,37 +247,68 @@ class StudyAvailabilityModal extends Modal {
     this.composerDraft='';this.ready=false;this.messages.push({role:'user',content:question});this.busy=true;this.render();
     try{
       const timezone=this.plugin.state.ai.timezone||'Asia/Shanghai';
-      const systemPrompt=availabilityPrompt({availability:this.proposed,restBlocks:this.proposedRestBlocks,timezone});
-      const result=await this.plugin.callDeepSeek({user:question,history:this.history,systemPrompt,thinking:false,reasoningEffort:'none',maxTokens:1800,responseFormat:{type:'json_object'}});
-      const parsed=parseAvailabilityResponse(result.content,{restBlocks:this.proposedRestBlocks});
+      const systemPrompt=availabilityPrompt({availability:this.proposed,restBlocks:this.proposedRestBlocks,dateAvailability:this.proposedDateAvailability,dailyRoutine:this.proposedRoutine,timezone,scheduleProfile:this.plugin.state.ai.scheduleProfile,routineExceptions:this.proposedRoutineExceptions});
+      const result=await this.plugin.callDeepSeek({user:question,history:this.history,systemPrompt,languageScope:'system',thinking:false,reasoningEffort:'none',maxTokens:6000,responseFormat:{type:'json_object'}});
+      const parsed=parseAvailabilityResponse(result.content,{restBlocks:this.proposedRestBlocks,dateAvailability:this.proposedDateAvailability,dailyRoutine:this.proposedRoutine,scheduleProfile:this.plugin.state.ai.scheduleProfile,routineExceptions:this.proposedRoutineExceptions});
       if(this.closed)return;
-      this.history=result.history;this.proposed=parsed.availability;this.proposedRestBlocks=parsed.restBlocks;this.ready=parsed.ready;
+      this.history=result.history;this.proposed=parsed.availability;this.proposedRestBlocks=parsed.restBlocks;this.proposedDateAvailability=parsed.dateAvailability;this.proposedRoutine=parsed.dailyRoutine;this.proposedRoutineExceptions=parsed.routineExceptions;this.ready=parsed.ready;
       this.messages.push({role:'assistant',content:parsed.reply,usage:result.usage});
     }catch(error){if(this.closed)return;console.error('Learning Hub study availability:',error);this.messages.push({role:'assistant',content:error.message||tr("暂时无法整理可学习时间，请重试。")});}
     finally{if(!this.closed){this.busy=false;this.render();}}
   }
   async apply(){
-    if(this.busy||!this.ready||!this.proposed.length)return;
+    if(this.busy||!this.ready)return;
     const current=this.plugin.state.ai?.availability;
-    const currentRest=this.plugin.state.ai?.restBlocks||[];
-    if(JSON.stringify(current||[])!==JSON.stringify(this.initialAvailability)||JSON.stringify(normalizeRestBlocks(currentRest))!==JSON.stringify(this.initialRestBlocks)){new Notice(tr("时间安排已在其他窗口中更新，请重新打开设置。"));return;}
-    let next,nextRest;
-    try{next=normalizeAvailability(this.proposed);nextRest=normalizeRestBlocks(this.proposedRestBlocks);}
+    const currentRest=this.plugin.state.ai?.restBlocks||[],previousDraft=this.plugin.state.scheduleDraft;
+    if(JSON.stringify(current||[])!==JSON.stringify(this.initialAvailability)||JSON.stringify(normalizeRestBlocks(currentRest))!==JSON.stringify(this.initialRestBlocks)||JSON.stringify(this.plugin.state.ai.dateAvailability)!==JSON.stringify(this.initialDateAvailability)||JSON.stringify(this.plugin.state.ai.dailyRoutine)!==JSON.stringify(this.initialRoutine)||JSON.stringify(this.plugin.state.ai.routineExceptions||[])!==JSON.stringify(this.initialRoutineExceptions)){new Notice(tr("时间安排已在其他窗口中更新，请重新打开设置。"));return;}
+    let next,nextRest,nextDates,nextRoutine;
+    try{next=normalizeAvailability(this.proposed);nextRest=normalizeRestBlocks(this.proposedRestBlocks);nextDates=normalizeDateAvailability(this.proposedDateAvailability);nextRoutine=normalizeRoutine(this.proposedRoutine);enforceProfileSettings({...this.plugin.state.ai,availability:next,dateAvailability:nextDates,dailyRoutine:nextRoutine,routineExceptions:this.proposedRoutineExceptions});}
     catch(error){new Notice(error.message);return;}
-    try{this.plugin.state.ai.availability=next;this.plugin.state.ai.restBlocks=nextRest;await this.plugin.saveData(this.plugin.state);}
-    catch(error){this.plugin.state.ai.availability=this.initialAvailability.map(row=>({...row}));this.plugin.state.ai.restBlocks=this.initialRestBlocks.map(row=>({...row,days:row.days?[...row.days]:undefined}));new Notice(tr("保存失败：{0}",[error.message]));return;}
+    try{this.plugin.state.ai.availability=next;this.plugin.state.ai.restBlocks=nextRest;this.plugin.state.ai.dateAvailability=nextDates;this.plugin.state.ai.dailyRoutine=nextRoutine;this.plugin.state.ai.routineExceptions=this.proposedRoutineExceptions;delete this.plugin.state.scheduleDraft;await this.plugin.saveData(this.plugin.state);}
+    catch(error){this.plugin.state.scheduleDraft=previousDraft;this.plugin.state.ai.routineExceptions=this.initialRoutineExceptions;this.plugin.state.ai.dateAvailability=this.initialDateAvailability;this.plugin.state.ai.dailyRoutine=this.initialRoutine;this.plugin.state.ai.availability=this.initialAvailability.map(row=>({...row}));this.plugin.state.ai.restBlocks=structuredClone(this.initialRestBlocks);new Notice(tr("保存失败：{0}",[error.message]));return;}
     this.close();
-    try{if(this.plugin.rollingPromise)try{await this.plugin.rollingPromise;}catch(_){}await this.plugin.updateRollingSchedule();new Notice(tr("可学习时间与休息安排已更新，滚动日程已同步。"));}
-    catch(error){new Notice(tr("时间安排已保存，但滚动日程更新失败：{0}",[error.message]));}
-    for(const leaf of this.plugin.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='schedule')await leaf.view.render();
+    this.plugin.refreshBlocks();new Notice(tr('作息与时间规则已保存；已确认日程可通过 AI 对话调整。'));
+    await this.plugin.refreshScheduleViews();
   }
+}
+
+class ScheduleAdjustmentModal extends Modal {
+  constructor(plugin){super(plugin.app);this.plugin=plugin;this.closed=false;}
+  onOpen(){this.modalEl.addClass('lh-schedule-adjustment-shell');this.contentEl.addClass('learning-hub-modal','learning-hub','lh-schedule-adjustment-modal');this.plugin.scheduleAdjustmentModal=this;this.render();}
+  onClose(){this.closed=true;if(this.plugin.scheduleAdjustmentModal===this)this.plugin.scheduleAdjustmentModal=null;this.contentEl.empty();}
+  render(){
+    if(this.closed)return;const root=this.contentEl;root.empty();root.classList.toggle('is-preview',this.activePane==='preview');
+    const head=root.createDiv({cls:'lh-adjust-head'}),heading=head.createDiv({cls:'lh-adjust-heading'});heading.createEl('h2',{text:tr('AI 调整日程')});heading.createEl('p',{text:tr('告诉我想改什么，核对后再应用。')});head.createSpan({text:'DeepSeek',cls:'lh-adjust-provider'});
+    const routine=this.plugin.state.ai.dailyRoutine||{};
+    if(!routine.wakeTime||!routine.sleepTime){const notice=root.createDiv({cls:'lh-adjust-rule-notice'});setIcon(notice.createSpan({cls:'lh-adjust-notice-icon'}),'info');notice.createSpan({text:tr('应用前需设定起床和睡觉时间')});const setup=notice.createEl('button',{text:tr('设置时间规则')});setup.onclick=()=>this.plugin.openAvailabilitySettings();}
+    if(!this.plugin.state.scheduleDraft){const empty=root.createDiv({cls:'lh-adjust-reload'});empty.createEl('p',{text:tr('时间规则已更新，请重新载入日程开始调整。')});const restart=empty.createEl('button',{text:tr('载入当前日程'),cls:'lh-primary'});restart.onclick=()=>this.plugin.openScheduleAdjustment();return;}
+    const tabs=root.createDiv({cls:'lh-adjust-tabs',attr:{role:'tablist'}});for(const [pane,label] of [['chat',tr('对话')],['preview',tr('日程预览')]]){const tab=tabs.createEl('button',{text:label,attr:{type:'button',role:'tab','aria-selected':String((this.activePane||'chat')===pane)}});tab.onclick=()=>{this.activePane=pane;root.classList.toggle('is-preview',pane==='preview');for(const button of tabs.querySelectorAll('button'))button.setAttribute('aria-selected',String(button===tab));};}
+    const board=root.createDiv({cls:'lh-adjust-board'}),chat=board.createDiv({cls:'lh-adjust-chat'}),preview=board.createDiv({cls:'lh-adjust-preview'});
+    const scratch=root.createDiv();this.plugin.renderScheduleDraft(scratch);const source=scratch.querySelector('.lh-schedule-draft'),body=source.querySelector('.lh-schedule-draft-body'),conversation=body.querySelector('.lh-schedule-conversation');
+    const messages=conversation.querySelector('.lh-schedule-conversation-messages'),composer=conversation.querySelector('.lh-schedule-conversation-composer');chat.append(messages,composer);
+    if(!(this.plugin.state.scheduleDraft.conversation||[]).length){messages.empty();const welcome=messages.createDiv({cls:'lh-adjust-welcome'});setIcon(welcome.createDiv({cls:'lh-adjust-welcome-icon'}),'messages-square');welcome.createEl('h3',{text:tr('你想怎样调整日程？')});welcome.createEl('p',{text:tr('移动时间、移除安排，或替换成另一项任务。')});const examples=welcome.createDiv({cls:'lh-adjust-examples'});for(const text of [tr('把一项任务移到下午'),tr('移除明天的复习'),tr('周五晚上留空')]){const button=examples.createEl('button',{text});button.onclick=()=>{const input=composer.querySelector('textarea');input.value=text;this.composerDraft=text;input.focus();};}}
+    const input=composer.querySelector('textarea'),send=composer.querySelector('button'),originalSend=send.onclick,originalKey=input.onkeydown;
+    input.value=this.composerDraft||'';input.oninput=()=>{this.composerDraft=input.value;};send.setText(tr('发送'));send.setAttribute('aria-label',tr('发送日程调整要求'));setIcon(send.createSpan(),'arrow-up');
+    send.onclick=event=>{if(input.value.trim()&&!input.disabled)this.composerDraft='';originalSend(event);};input.onkeydown=event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&input.value.trim()&&!input.disabled)this.composerDraft='';originalKey(event);};
+    chat.createDiv({text:tr('Enter 发送 · Shift + Enter 换行'),cls:'lh-adjust-composer-hint'});
+    const previewHead=preview.createDiv({cls:'lh-adjust-preview-head'});previewHead.createEl('h3',{text:tr('日程预览')});const saved=this.plugin.state.scheduleDraft;previewHead.createSpan({text:`${saved.request.startDate.slice(5).replace('-','/')} — ${saved.request.endDate.slice(5).replace('-','/')}`});
+    const previewScroll=preview.createDiv({cls:'lh-adjust-preview-scroll'}),picker=body.querySelector('.lh-schedule-date-picker');picker.querySelector('strong')?.setText(tr('应用日期'));
+    for(const label of picker.querySelectorAll('label')){const copy=label.querySelector('span'),date=copy.textContent;label.title=date;label.querySelector('input').setAttribute('aria-label',date);copy.setText(date.slice(5).replace('-','/'));}
+    previewScroll.append(picker);
+    const summary=body.querySelector('.lh-section-description');if(!(saved.conversation||[]).length)summary.setText(tr('当前日程。对话后的修改会显示在这里。'));previewScroll.append(summary);
+    const notes=[...body.children].filter(node=>node.matches('.lh-draft-conflict,.lh-flow-muted'));if(notes.length){const details=previewScroll.createEl('details',{cls:'lh-adjust-checks'});details.createEl('summary',{text:tr('{0} 项需要检查',[notes.length])});for(const note of notes)details.append(note);}
+    const actions=body.querySelector('.lh-confirm-actions');actions.classList.add('lh-adjust-apply');const apply=actions.querySelector('.lh-primary');apply.setText(tr('应用所选日期'));
+    for(const node of [...body.children])if(node!==conversation&&node!==actions)previewScroll.append(node);
+    preview.append(actions);scratch.remove();
+  }
+
 }
 
 class CourseInitialModal extends Modal {
   constructor(plugin,course,sourcePath){super(plugin.app);this.plugin=plugin;this.course=course;this.sourcePath=sourcePath;this.phase='extracting';this.startedAt=Date.now();this.receivedChars=0;this.tokenUsage=null;this.reasoningSummary='';this.reasoningIndex=null;this.reasoningRenderVersion=0;this.reasoningRenderTimer=null;this.reasoningRenderHost=null;this.reasoningQueuedSource='';this.draft=null;this.error='';this.running=false;this.closed=false;}
   onOpen(){this.modalEl.addClass('lh-course-initial-shell');this.contentEl.addClass('learning-hub-modal','lh-course-initial-modal');this.render();this.ticker=setInterval(()=>this.updateProgress(),1000);void this.start();}
   onClose(){this.closed=true;clearInterval(this.ticker);clearTimeout(this.reasoningRenderTimer);this.reasoningRenderVersion++;this.contentEl.empty();}
-  updateProgress(){if(this.closed)return;const status=this.contentEl.querySelector('.lh-course-initial-status');if(status){const label={extracting:tr("正在提取文件文字"),queued:tr("等待 Codex"),connecting:tr("连接 Codex"),starting:tr("启动分析"),generating:tr("正在分析 Syllabus"),receiving:tr("正在接收结果"),complete:tr("解析完成"),failed:tr("解析失败")}[this.phase]||tr("正在处理");status.setText(tr("{0} · {1} 秒{2}", [label, Math.floor((Date.now()-this.startedAt)/1000), this.receivedChars?tr(" · 已接收 {0} 字符", [this.receivedChars]):'']));}const usage=this.contentEl.querySelector('.lh-course-initial-usage');if(usage)usage.setText(this.tokenUsage?formatCodexUsage(this.tokenUsage):'');this.renderReasoning();}
+  updateProgress(){if(this.closed)return;const status=this.contentEl.querySelector('.lh-course-initial-status');if(status){const label={extracting:tr("正在提取文件文字"),queued:tr("等待 Codex"),connecting:tr("连接 Codex"),starting:tr("启动分析"),generating:tr("正在分析 Syllabus"),receiving:tr("正在接收结果"),complete:tr("解析完成"),failed:tr("解析失败")}[this.phase]||tr("正在处理");status.setText(tr("{0} · {1} 秒{2}", [label, Math.floor((Date.now()-this.startedAt)/1000), this.receivedChars?tr(" · 已接收 {0} 字符", [this.receivedChars]):'']));}const usage=this.contentEl.querySelector('.lh-course-initial-usage');renderTokenUsage(usage,this.tokenUsage);this.renderReasoning();}
   renderReasoning(){
     const host=this.contentEl.querySelector('.lh-course-initial-reasoning');if(!host)return;
     if(host!==this.reasoningRenderHost){this.reasoningRenderHost=host;this.reasoningQueuedSource='';}
@@ -281,7 +341,7 @@ class CourseInitialModal extends Modal {
     const head=root.createDiv({cls:'lh-course-initial-head'});head.createSpan({text:tr("COURSE INITIALIZATION \u00b7 CODEX"),cls:'lh-course-initial-kicker'});head.createEl('h2',{text:this.draft?tr("核对课程概览"):tr("解析 Syllabus")});head.createEl('p',{text:this.course});
     const source=root.createDiv({cls:'lh-course-initial-source'});source.createSpan({text:tr("来源文件")});source.createEl('strong',{text:this.sourcePath.split('/').at(-1)});
     if(!this.draft){const loading=root.createDiv({cls:'lh-course-initial-loading'});loading.createEl('strong',{text:this.phase==='failed'?tr("解析没有完成"):tr("正在整理整门课的信息")});loading.createDiv({cls:'lh-course-initial-status'});loading.createDiv({cls:'lh-course-initial-usage'});if(this.error)loading.createEl('p',{text:this.error,cls:'lh-course-initial-error'});else loading.createEl('p',{text:tr("原文件已保存；确认前不会写入课程概览。")});loading.createDiv({cls:'lh-course-initial-reasoning markdown-rendered'});this.updateProgress();}
-    else{const preview=root.createDiv({cls:'lh-course-initial-preview markdown-rendered'});const markdown=formatCourseInitial(this.course,this.draft,this.sourcePath);const notePath=this.plugin.courseOverviewPath(this.course);try{const rendered=MarkdownRenderer?.render?MarkdownRenderer.render(this.app,markdown,preview,notePath,this):MarkdownRenderer?.renderMarkdown?MarkdownRenderer.renderMarkdown(markdown,preview,notePath,this):null;if(rendered)void Promise.resolve(rendered).catch(error=>{console.warn('Learning Hub syllabus preview:',error);preview.setText(markdown);});else if(!MarkdownRenderer?.render&&!MarkdownRenderer?.renderMarkdown)preview.setText(markdown);}catch(error){console.warn('Learning Hub syllabus preview:',error);preview.setText(markdown);}if(this.tokenUsage)root.createDiv({text:formatCodexUsage(this.tokenUsage),cls:'lh-course-initial-usage lh-course-initial-result-usage'});}
+    else{const preview=root.createDiv({cls:'lh-course-initial-preview markdown-rendered'});const markdown=formatCourseInitial(this.course,this.draft,this.sourcePath);const notePath=this.plugin.courseOverviewPath(this.course);try{const rendered=MarkdownRenderer?.render?MarkdownRenderer.render(this.app,markdown,preview,notePath,this):MarkdownRenderer?.renderMarkdown?MarkdownRenderer.renderMarkdown(markdown,preview,notePath,this):null;if(rendered)void Promise.resolve(rendered).catch(error=>{console.warn('Learning Hub syllabus preview:',error);preview.setText(markdown);});else if(!MarkdownRenderer?.render&&!MarkdownRenderer?.renderMarkdown)preview.setText(markdown);}catch(error){console.warn('Learning Hub syllabus preview:',error);preview.setText(markdown);}if(this.tokenUsage)renderTokenUsage(root.createDiv({cls:'lh-course-initial-usage lh-course-initial-result-usage'}),this.tokenUsage);}
     const footer=root.createDiv({cls:'lh-course-initial-footer'});const cancel=footer.createEl('button',{text:tr("关闭"),cls:'lh-secondary'});cancel.onclick=()=>this.close();
     if(this.phase==='failed'){const retry=footer.createEl('button',{text:tr("重新解析"),cls:'lh-primary'});retry.onclick=()=>void this.start();}
     if(this.draft){const apply=footer.createEl('button',{text:tr("确认写入课程概览"),cls:'lh-primary'});apply.onclick=async()=>{apply.disabled=true;try{await this.plugin.applyCourseInitial(this.course,this.sourcePath,this.draft);this.close();await this.plugin.openHub('course',this.course);new Notice(tr("Course Initial 已写入课程概览"));}catch(error){console.error('Learning Hub course initial save:',error);new Notice(tr("保存失败：{0}", [error.message]));apply.disabled=false;}};}
@@ -303,7 +363,7 @@ class ConfirmModal extends Modal {
 }
 
 class HomeworkModal extends Modal {
-  constructor(app,plugin,course,files,existing,done){super(app);this.plugin=plugin;this.course=course;this.files=files;this.existing=existing;this.done=done;}
+  constructor(app,plugin,course,files,existing,done,kind='lab'){super(app);this.plugin=plugin;this.course=course;this.files=files;this.existing=existing;this.done=done;this.kind=existing?materialKind(existing):kind;}
   onOpen(){
     const el=this.contentEl;el.empty();el.addClass('learning-hub-modal','lh-homework-modal');
     el.createEl('h2',{text:this.existing?tr("编辑作业信息"):tr("上传并存档作业")});
@@ -311,14 +371,14 @@ class HomeworkModal extends Modal {
     const field=(name,type='text',value='')=>{const row=el.createDiv({cls:'lh-form-row'});row.createEl('label',{text:name});const input=row.createEl('input',{attr:{type}});configureDateInput(input);input.value=value;return input;};
     const title=field(tr("作业名称"),'text',this.existing?.title||this.files[0]?.name.replace(/\.[^.]+$/,'')||'');
     const due=field(tr("截止日期（可选）"),'date',this.existing?.due||'');
-    el.createEl('p',{text:tr("设置截止日期后，会自动加入本课程待办并进入 7 天滚动日程；清除日期会取消联动。"),cls:'lh-confirm-copy'});
+    el.createEl('p',{text:tr("上传后自动加入待办；AI 分析题目并估算完成用时，填写或清除截止日期不会取消待办联动。"),cls:'lh-confirm-copy'});
     let difficulty,topics;
     if(this.existing){
       const difficultyRow=el.createDiv({cls:'lh-form-row'});difficultyRow.createEl('label',{text:tr("难度（可修正 AI 结果）")});difficulty=difficultyRow.createEl('select');
       for(let n=1;n<=5;n++)difficulty.createEl('option',{text:`${n} · ${n<=2?tr("基础"):n===3?tr("中等"):tr("较难")}`,attr:{value:String(n)}});
       difficulty.value=String(this.existing.difficulty||3);
       const topicRow=el.createDiv({cls:'lh-form-row'});topicRow.createEl('label',{text:tr("涉及知识点（可修正 AI 结果）")});topics=topicRow.createEl('textarea',{attr:{placeholder:tr("例如：矩阵可逆、秩、特征值")}});topics.value=(this.existing.topics||[]).join('、');
-    }else el.createEl('p',{text:tr("保存后会自动整理题目并分析难度与知识点。"),cls:'lh-confirm-copy'});
+    }else el.createEl('p',{text:tr("保存后会自动整理大题和小问，分析知识点与难度，并评估完成用时。"),cls:'lh-confirm-copy'});
     const lessonRow=el.createDiv({cls:'lh-form-row'});lessonRow.createEl('label',{text:tr("关联讲次")});const lesson=lessonRow.createEl('select');lesson.createEl('option',{text:tr("整个课程 / 稍后选择"),attr:{value:''}});
     for(const file of this.plugin.lessons(this.course))lesson.createEl('option',{text:file.basename,attr:{value:file.path}});
     lesson.value=this.existing?.lessonPath||'';
@@ -336,40 +396,61 @@ class HomeworkModal extends Modal {
 }
 
 class LabModal extends Modal {
-  constructor(app,plugin,course,files,existing,done){super(app);this.plugin=plugin;this.course=course;this.files=files;this.existing=existing;this.done=done;}
+  constructor(app,plugin,course,files,existing,done,kind='lab'){super(app);this.plugin=plugin;this.course=course;this.files=files;this.existing=existing;this.done=done;this.kind=existing?materialKind(existing):kind;}
   onOpen(){
     const el=this.contentEl;el.empty();el.addClass('learning-hub-modal','lh-homework-modal');
-    el.createEl('h2',{text:this.existing?tr("编辑 Lab Session"):tr("上传 Lab Session 课件")});
+    el.createEl('h2',{text:tr(this.existing?'编辑练习资料':'上传练习资料')+' · '+(this.kind==='tutorial'?'Tutorial':'Lab')});
     if(this.files.length)el.createEl('p',{text:tr("已选择 {0} 个文件：{1}", [this.files.length, this.files.map(file=>file.name).join('、')]),cls:'lh-confirm-copy'});
     const field=(label,type,value)=>{const row=el.createDiv({cls:'lh-form-row'});row.createEl('label',{text:label});const input=row.createEl('input',{attr:{type}});configureDateInput(input);input.value=value||'';return input;};
-    const title=field(tr("Lab Session 名称"),'text',this.existing?.title||this.files[0]?.name.replace(/\.[^.]+$/,'')||'');
+    const title=field(tr("资料名称"),'text',this.existing?.title||this.files[0]?.name.replace(/\.[^.]+$/,'')||'');
     const due=field(tr("截止日期（可选）"),'date',this.existing?.due);
     const row=el.createDiv({cls:'lh-form-row'});row.createEl('label',{text:tr("关联讲次（可选）")});
     const lesson=row.createEl('select');lesson.createEl('option',{text:tr("整个课程"),attr:{value:''}});
     for(const file of this.plugin.lessons(this.course))lesson.createEl('option',{text:file.basename,attr:{value:file.path}});
     lesson.value=this.existing?.lessonPath||'';
+    const sources=this.files.length?this.files:this.existing?.files||[],roles=[];
+    for(const file of sources){const row=el.createDiv({cls:'lh-form-row lh-practice-role'});row.createEl('label',{text:file.name});const select=row.createEl('select',{attr:{'aria-label':file.name+' · '+tr('资料类型')}});for(const [value,label] of [['mixed','题目与讲解'],['exercise','练习题 / 代码模板'],['answer','参考答案'],['explanation','详细讲解']])select.createEl('option',{text:tr(label),attr:{value}});select.value=file.role||sourceRole(file.name);roles.push(select);}
+    const reviewRow=el.createEl('label',{cls:'lh-practice-toggle'}),review=reviewRow.createEl('input',{attr:{type:'checkbox'}});review.checked=this.existing?.useForReview!==false;reviewRow.createSpan({text:tr('复习时参考这份资料')});
+    const todoRow=el.createEl('label',{cls:'lh-practice-toggle'}),todo=todoRow.createEl('input',{attr:{type:'checkbox'}});todo.checked=this.existing?.includeTodo!==false;todoRow.createSpan({text:tr('加入待办，安排练习时间')});
     const actions=el.createDiv({cls:'lh-confirm-actions'});
     const cancel=actions.createEl('button',{text:tr("取消")});cancel.onclick=()=>this.close();
     const save=actions.createEl('button',{text:this.existing?tr("保存信息"):tr("保存并解析"),cls:'mod-cta'});
     save.onclick=async()=>{
       if(!validateTemporalInputs(el))return;
-      if(!title.value.trim()){new Notice(tr("请填写 Lab Session 名称"));return;}
+      if(!title.value.trim()){new Notice(tr("请填写资料名称"));return;}
       save.disabled=true;
-      try{await this.done({title:title.value.trim(),due:due.value,lessonPath:lesson.value});this.close();}
-      catch(error){console.error('Learning Hub lab:',error);new Notice(tr("Lab Session 保存失败：{0}", [error.message]));save.disabled=false;}
+      try{await this.done({title:title.value.trim(),due:due.value,lessonPath:lesson.value,kind:this.kind,useForReview:review.checked,includeTodo:todo.checked,fileRoles:roles.map(select=>select.value)});this.close();}
+      catch(error){console.error('Learning Hub lab:',error);new Notice(tr("资料保存失败：{0}", [error.message]));save.disabled=false;}
     };
   }
 }
 
+class ScheduleItemModal extends Modal {
+  constructor(plugin,item){super(plugin.app);this.plugin=plugin;this.item=item;}
+  onOpen(){
+    const p=this.plugin,item=this.item,root=this.contentEl;this.modalEl.addClass('lh-calendar-detail-shell');root.addClass('learning-hub-modal','lh-calendar-detail');const kind=calendarCategory(item,p.state.calendarChoices);root.createDiv({text:tr(kind==='task'?'学习安排':kind==='course'?'课程安排':kind==='routine'?'生活作息':kind==='rest'?'休息安排':'日程详情'),cls:'lh-eyebrow'});root.createEl('h2',{text:p.itemDisplayTitle(item)});root.createDiv({text:item.allDay?item.start.slice(0,10)+' · '+tr('全天'):item.start.replace('T',' ')+' — '+item.end.replace('T',' '),cls:'lh-calendar-detail-time'});
+    if(item.location)root.createDiv({text:item.location,cls:'lh-calendar-detail-location'});
+    if(item.description)root.createEl('p',{text:item.description});
+    if(kind==='routine'||kind==='rest')root.createEl('p',{text:tr('根据时间规则与周规划显示。调整后会同步更新日历。'),cls:'lh-calendar-detail-note'});
+    const linked=item.taskId?p.state.tasks.find(task=>task.id===item.taskId):null,actions=root.createDiv({cls:'lh-calendar-detail-actions'});
+    if(item.source==='google-calendar'){const type=classifyCalendarEvent(item,p.state.calendarChoices).type;if(['tut','lab'].includes(type)){const label=actions.createEl('label',{cls:'lh-attendance-toggle'}),check=label.createEl('input',{attr:{type:'checkbox'}});check.checked=p.state.calendarChoices[item.id]?.attend===true;label.createSpan({text:tr('参加')});check.onchange=async()=>{p.state.calendarChoices[item.id]={...(p.state.calendarChoices[item.id]||{}),attend:check.checked};await p.save();await p.updateRollingSchedule();};}}
+    if((kind==='task'&&item.source!=='profile-setting'&&item.source!=='fixed-setting')||(kind==='external'&&item.source==='google-calendar')){const record=actions.createEl('button',{text:tr('记录完成情况'),cls:'lh-primary'});record.onclick=()=>{this.close();p.recordOutcome(linked&&!isLongTerm(linked)?linked:item,linked&&!isLongTerm(linked)?'task':item.source==='google-calendar'?'calendar':'slot');};}
+    if(linked||item.taskId){const open=actions.createEl('button',{text:tr('进入任务'),cls:'lh-secondary'});open.onclick=()=>{this.close();p.openSlotTarget(item);};}
+    else if(kind==='course'){const course=item.course||matchCalendarCourse(item,p.courses),open=course?actions.createEl('button',{text:tr('查看课程'),cls:'lh-secondary'}):null;if(open)open.onclick=()=>{this.close();p.openHub('course',course);};}
+    if(kind==='routine'||kind==='rest'||item.source==='profile-setting'){const rules=actions.createEl('button',{text:tr('时间规则'),cls:'lh-secondary'});rules.onclick=()=>{this.close();p.openAvailabilitySettings();};}
+    const close=actions.createEl('button',{text:tr('关闭'),cls:'lh-secondary'});close.onclick=()=>this.close();
+  }
+}
+
 class LearningHubMain extends ItemView {
-  constructor(leaf,plugin){super(leaf);this.plugin=plugin;this.page='home';this.course=null;this.lessonPath=null;this.round=0;}
+  constructor(leaf,plugin){super(leaf);this.plugin=plugin;this.page='home';this.course=null;this.lessonPath=null;this.round=0;this.assignmentId=null;}
   getViewType(){return MAIN;}
-  getDisplayText(){return ['preview','recall','review'].includes(this.page)?`${this.page==='preview'?tr("预习"):this.page==='recall'?tr("回忆"):tr("复习 {0}", [this.round])} · ${this.course?.split(' - ')[0]||''}`:this.page==='assignments'?tr("作业与 Lab Session · {0}", [this.course?.split(' - ')[0]||'']):this.page==='lesson'?`${this.lessonPath?.split('/').at(-1)?.replace(/\.md$/,'')||tr("讲次")} · ${this.course?.split(' - ')[0]||''}`:this.page==='course'?tr("课程概览 · {0}", [this.course?.split(' - ')[0]||'']):this.page==='schedule'?tr("完整日程"):this.page==='tasks'?tr("待办事项"):this.page==='retrospect'?tr("学习复盘"):this.page===DRAFTS_PAGE?tr("草稿本"):tr("学习主页");}
+  getDisplayText(){return this.page==='practice'?tr('练习资料 · {0}',[this.course?.split(' - ')[0]||'']):this.page==='homework'?tr('作业详情 · {0}',[this.course?.split(' - ')[0]||'']):['preview','recall','review'].includes(this.page)?`${this.page==='preview'?tr("预习"):this.page==='recall'?tr("回忆"):tr("复习 {0}", [this.round])} · ${this.course?.split(' - ')[0]||''}`:this.page==='assignments'?tr("作业与练习 · {0}", [this.course?.split(' - ')[0]||'']):this.page==='lesson'?`${this.lessonPath?.split('/').at(-1)?.replace(/\.md$/,'')||tr("讲次")} · ${this.course?.split(' - ')[0]||''}`:this.page==='course'?tr("课程概览 · {0}", [this.course?.split(' - ')[0]||'']):this.page==='schedule'?tr("完整日程"):this.page==='tasks'?tr("待办事项"):this.page==='retrospect'?tr("学习复盘"):this.page===DRAFTS_PAGE?tr("草稿本"):tr("学习主页");}
   getIcon(){return 'layout-dashboard';}
-  getState(){return {page:this.page,course:this.course,lessonPath:this.lessonPath,round:this.round};}
-  async setState(state,result){this.page=state?.page||'home';this.course=state?.course||null;this.lessonPath=state?.lessonPath||null;this.round=state?.round||0;if(super.setState)await super.setState(state,result);if(this.contentEl?.children?.length)await this.render();}
+  getState(){return {page:this.page,course:this.course,lessonPath:this.lessonPath,round:this.round,assignmentId:this.assignmentId};}
+  async setState(state,result){this.page=state?.page||'home';this.course=state?.course||null;this.lessonPath=state?.lessonPath||null;this.round=state?.round||0;this.assignmentId=state?.assignmentId||null;if(super.setState)await super.setState(state,result);if(this.contentEl?.children?.length)await this.render();}
   async onOpen(){this.contentEl.addClass('lh-main-view');await this.render();}
-  async setPage(page,course,lessonPath=null,round=0){this.page=page;this.course=course;this.lessonPath=lessonPath;this.round=round;await this.render();this.leaf.updateHeader?.();}
+  async setPage(page,course,lessonPath=null,round=0,assignmentId=null){this.page=page;this.course=course;this.lessonPath=lessonPath;this.round=round;this.assignmentId=assignmentId;const scroll=this.contentEl?.querySelector('.lh-page-scroll');if(scroll)scroll.scrollTop=0;await this.render();this.leaf.updateHeader?.();}
   async render(){
     const host=this.contentEl;if(!host)return;
     const previousScroll=host.querySelector?.('.lh-page-scroll')?.scrollTop||0;
@@ -384,10 +465,12 @@ class LearningHubMain extends ItemView {
     const page=scroll.createDiv({cls:'learning-hub'});
     if(this.page==='course'&&this.course)await this.plugin.renderCourse(page,{sourcePath:`${ROOT}/${this.course}/学习概览.md`});
     else if(this.page==='lesson'&&this.course)await this.plugin.renderLessonCourse(page,{sourcePath:`${ROOT}/${this.course}/学习概览.md`,lessonPath:this.lessonPath});
+    else if(this.page==='practice'&&this.course)await this.plugin.renderPracticeDetail(page,this.course,this.assignmentId);
+    else if(this.page==='homework'&&this.course)await this.plugin.renderHomeworkDetail(page,this.course,this.assignmentId);
     else if(this.page==='assignments'&&this.course)await this.plugin.renderAssignments(page,this.course);
     else if(['preview','recall','review'].includes(this.page)&&this.lessonPath)await this.plugin.renderWorkflow(page,{page:this.page,course:this.course,lessonPath:this.lessonPath,round:this.round});
     else if(this.page==='schedule')this.plugin.renderSchedule(page);
-    else if(this.page==='tasks')this.plugin.renderTasks(page);
+    else if(this.page==='tasks')await this.plugin.renderTasks(page);
     else if(this.page==='retrospect')this.plugin.renderRetrospect(page);
     else if(this.page===DRAFTS_PAGE)this.plugin.renderDrafts(page);
     else await this.plugin.renderHome(page);
@@ -404,8 +487,10 @@ class LearningNav extends ItemView {
   getIcon(){return 'library';}
   async onOpen(){await this.render();}
   async render(){
-    const p=this.plugin, root=this.contentEl;root.empty();root.addClass('lh-nav-root');
-    const course=p.activeCourse(),sidebar=root.createDiv({cls:'lh-sidebar'});
+    const p=this.plugin,root=this.contentEl,revision=this.renderRevision=(this.renderRevision||0)+1;
+    const course=p.activeCourse();
+    if(revision!==this.renderRevision)return;
+    root.empty();root.addClass('lh-nav-root');const sidebar=root.createDiv({cls:'lh-sidebar'});
     const header=sidebar.createDiv({cls:'lh-sidebar-header'});
     const identity=header.createDiv({cls:'lh-sidebar-identity'});
     identity.createDiv({text:course?tr("COURSE SPACE"):tr("PERSONAL SPACE"),cls:'lh-sidebar-kicker'});
@@ -430,14 +515,14 @@ class LearningNav extends ItemView {
       const syllabus=p.syllabus(course);
       if(syllabus)item(tr("课程大纲"),'book-open',()=>p.open(syllabus.path));
       item(tr("课程文件"),'folder-open',()=>p.open(`${base}/${course}.md`));
-      item(tr("作业与 Lab Session"),'archive',()=>p.openHub('assignments',course),p.lastMainLeaf?.view?.page==='assignments');
+      item(tr("作业与练习"),'archive',()=>p.openHub('assignments',course),['assignments','homework','practice'].includes(p.lastMainLeaf?.view?.page));
       if(selected){const plan=p.reviewPlan(await p.readFlow(selected)),next=plan.find(r=>r.unlocked&&!r.completedAt)||plan.find(r=>!r.completedAt)||plan[2];item(tr("间隔复习"),'repeat-2',()=>p.showWorkflow('review',course,selected.path,next.round),p.lastMainLeaf?.view?.page==='review',plan.filter(r=>r.completedAt).length+'/3');}
       section(tr("讲次"),lessons.length);
-      if(!lessons.length)item(tr("上传课件"),'upload',()=>p.createLessonFromSlides(course),false,'','lh-nav-first-lesson');
       for(const lesson of lessons){
         const short=lesson.basename.split('@')[0].trim();
         item(short,'file-text',()=>{void p.selectLesson(course,lesson.path);},['lesson','preview','recall','review'].includes(p.lastMainLeaf?.view?.page)&&p.lastMainLeaf?.view?.lessonPath===lesson.path);
       }
+      item(tr("上传新讲课件"),'plus',()=>p.createLessonFromSlides(course),false,'','lh-nav-upload-lesson');
     }else{
       section(tr("工作台"));
       item(tr("个人主页"),'house',()=>p.open(HOME),p.currentPath()===HOME);
@@ -449,19 +534,20 @@ class LearningNav extends ItemView {
       if(!semesterCourses.length)scroll.createDiv({text:tr("这个学期还没有课程。"),cls:'lh-sidebar-empty'});
       for(const c of semesterCourses)item(c.split(' - ')[0],'book-open',()=>p.open(`${ROOT}/${c}/学习概览.md`));
       section(tr("其他空间"));
-      item('Projects','bot',()=>p.open('Projects/Projects.md'));
       item(tr("课外学习"),'compass',()=>p.open(`${ROOT}/Self Study/Self Study.md`));
       item(tr("草稿本"),'file-clock',()=>p.openHub(DRAFTS_PAGE,null),p.lastMainLeaf?.view?.page===DRAFTS_PAGE);
     }
     const footer=sidebar.createDiv({cls:'lh-sidebar-footer'});
-    footer.createSpan({text:course?tr("{0} 讲课程资料", [p.lessons(course).length]):tr("{0} 门课程", [p.coursesForSemester().length])});
+    const counts=footer.createSpan();
+    counts.setText(course?tr("{0} 讲课程资料", [p.lessons(course).length]):tr("{0} 门课程", [p.coursesForSemester().length]));
     const settings=footer.createEl('button',{cls:'lh-sidebar-icon',attr:{'aria-label':tr('插件设置'),title:tr('插件设置')}});setIcon(settings,'settings');settings.onclick=()=>{p.app.setting.open();p.app.setting.openTabById(p.manifest.id);};
     const files=footer.createEl('button',{cls:'lh-sidebar-icon',attr:{'aria-label':tr("打开课程总目录"),title:tr("打开课程总目录")}});setIcon(files,'folder-open');files.onclick=()=>p.open(INDEX);
+    if(revision===this.renderRevision)this.leaf.updateHeader?.();
   }
 }
 
 module.exports=class LearningHub extends Plugin {
-  onunload(){this.unloaded=true;clearTimeout(this.draftCloseTimer);clearTimeout(this.refreshTimer);for(const timer of this.courseIndexSyncTimers?.values?.()||[])clearTimeout(timer);for(const feature of this.integratedFeatures||[]){try{feature.onunload?.();}catch(error){console.warn('Learning Hub integrated feature cleanup:',error);}}this.aiClient?.close();}
+  onunload(){this.unloaded=true;for(const analysis of this.questionAnalysisBySession?.values()||[])this.clearQuestionProgress(analysis);this.questionAnalysisBySession?.clear();for(const controller of this.labControllers?.values()||[])controller.abort();clearTimeout(this.draftCloseTimer);clearTimeout(this.refreshTimer);for(const timer of this.courseIndexSyncTimers?.values?.()||[])clearTimeout(timer);for(const feature of this.integratedFeatures||[]){try{feature.onunload?.();}catch(error){console.warn('Learning Hub integrated feature cleanup:',error);}}this.aiClient?.close();}
   integratedFeaturePath(key){return normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}/${key}.json`);}
   async loadIntegratedData(key,legacyId){
     const adapter=this.app.vault.adapter,path=this.integratedFeaturePath(key);
@@ -499,9 +585,10 @@ module.exports=class LearningHub extends Plugin {
     await require('./modules/local-storage').initializeLocalStorage(this);
     this.state=Object.assign({tasks:[],slots:[],reminders:[],calendarChoices:{},eventOutcomes:{},completionHistory:[],dismissedClassEventIds:[],courseScope:{},lastLessonByCourse:{},semesters:[],activeSemester:''},await this.loadData());
     this.state.interfaceLanguage=normalizeInterfaceLanguage(this.state.interfaceLanguage);setInterfaceLanguage(this.state.interfaceLanguage);
-    this.state.calendarChoices||={};this.state.eventOutcomes||={};this.state.completionHistory||=[];this.state.dismissedClassEventIds||=[];
+    this.state.calendarAttendanceRules||=[];this.state.calendarChoices=applyCalendarAttendanceRules(this.state.googleCalendar?.events||[],this.state.calendarChoices||{},this.state.calendarAttendanceRules);this.state.scheduleCalendarSpan=3;this.state.eventOutcomes||={};this.state.completionHistory||=[];this.state.dismissedClassEventIds||=[];
     const {normalizeAiSettings,LearningHubSettings}=require('./modules/settings');
     this.state.ai=normalizeAiSettings(this.state.ai);
+    if(!Array.isArray(this.state.ai.confirmedDates))this.state.ai.confirmedDates=[...new Set(this.state.slots.filter(slot=>slot.source==='ai'&&slot.acceptedAt&&slot.reason!=='每日滚动安排').map(slot=>slot.start.slice(0,10)))];
     const savedDeepseek=this.state.deepseek&&typeof this.state.deepseek==='object'?this.state.deepseek:{};
     const legacyDraftTitle=this.state.draftTitle&&typeof this.state.draftTitle==='object'?this.state.draftTitle:{};
     const migrateDraftApi=Boolean(legacyDraftTitle.endpoint||legacyDraftTitle.apiKey||legacyDraftTitle.model);
@@ -524,12 +611,12 @@ module.exports=class LearningHub extends Plugin {
     this.chatStore=createChatStore(this.app.vault.adapter);
     this.deepseekClient=createDeepSeekChatClient({requestUrl,pricing:()=>this.state.deepseek.pricing});
     this.addSettingTab(new LearningHubSettings(this.app,this));
-    await this.ensureWorkspace();
     await this.initializeIntegratedFeatures();
     if(!this.state.lastLessonByCourse||typeof this.state.lastLessonByCourse!=='object')this.state.lastLessonByCourse={};
     this.selectedLessonByCourse={...this.state.lastLessonByCourse};
     this.navigationCourse=null;
     this.courses=DEFAULT_COURSES;
+    await this.ensureWorkspace();
     await this.loadCourses();
     this.registerView(NAV,leaf=>new LearningNav(leaf,this));
     this.registerView(MAIN,leaf=>new LearningHubMain(leaf,this));
@@ -559,14 +646,15 @@ module.exports=class LearningHub extends Plugin {
     this.registerEvent(this.app.vault.on('create',file=>{this.refreshBlocks();void this.refreshNav();this.queueCourseIndexSync(file?.path);}));
     this.registerEvent(this.app.vault.on('delete',file=>{this.refreshBlocks();void this.refreshNav();this.queueCourseIndexSync(file?.path);}));
     this.registerEvent(this.app.vault.on('rename',(file,oldPath)=>{this.refreshBlocks();void this.refreshNav();this.queueCourseIndexSync(oldPath);this.queueCourseIndexSync(file?.path);}));
-    this.registerEvent(this.app.vault.on('modify',file=>this.queueCourseIndexSync(file?.path)));
+    this.registerEvent(this.app.vault.on('modify',file=>{this.queueCourseIndexSync(file?.path);}));
     this.registerInterval(window.setInterval(()=>{if(this.state.googleCalendar.tokens)void this.syncGoogleCalendar({quiet:true}).catch(error=>console.warn('Learning Hub calendar sync:',error));},15*60*1000));
-    this.registerInterval(window.setInterval(()=>{if(this.state.lastPlannedDay!==today())void this.updateRollingSchedule().catch(error=>console.warn('Learning Hub daily plan:',error));},30*60*1000));
+
     let lastScheduleClock=localNow();
-    this.registerInterval(window.setInterval(()=>{const current=localNow();if(lastScheduleClock.slice(0,10)!==current.slice(0,10)||this.allScheduleSlots().some(slot=>slot.end>=lastScheduleClock&&slot.end<current))this.refreshBlocks();lastScheduleClock=current;},60*1000));
+    this.registerInterval(window.setInterval(()=>{const current=localNow();updateCalendarClock(document,current);if(lastScheduleClock.slice(0,10)!==current.slice(0,10)||this.allScheduleSlots().some(slot=>slot.end>=lastScheduleClock&&slot.end<current))this.refreshBlocks();lastScheduleClock=current;},60*1000));
     this.registerInterval(window.setInterval(()=>{if(this.syncCompletedClasses()){void this.saveData(this.state).then(()=>{this.refreshBlocks();for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='retrospect')void leaf.view.render();}).catch(error=>console.warn('Learning Hub class history:',error));}},60*1000));
     this.app.workspace.onLayoutReady(async()=>{this.draftOpenPaths=this.currentWorkspacePaths();this.draftOpenTrackingReady=true;await this.loadCourses();await this.syncAllCourseIndexes();const file=this.app.workspace.getActiveFile(),leaf=this.app.workspace.activeLeaf;const main=this.app.workspace.getLeavesOfType(MAIN)[0];if(main){this.lastMainLeaf=main;this.navigationCourse=main.view?.course||null;}await this.alignChatWithAnnotations();await this.ensureNav();const target=this.pageForPath(file?.path);if(target)await this.openHub(target.page,target.course,leaf?.view?.file?.path===file.path?leaf:null);else await this.refreshNav();if(this.syncCompletedClasses())await this.saveData(this.state);this.refreshBlocks();if(this.state.googleCalendar.tokens)void this.syncGoogleCalendar({quiet:true}).catch(error=>console.warn('Learning Hub calendar sync:',error));void this.updateRollingSchedule().catch(error=>console.warn('Learning Hub daily plan:',error));});
   }
+  openAvailabilitySettings(){if(this.availabilityModal&&!this.availabilityModal.closed){this.availabilityModal.contentEl.querySelector('textarea')?.focus();return this.availabilityModal;}const modal=new StudyAvailabilityModal(this);modal.open();return modal;}
   async setInterfaceLanguage(language){
     this.state.interfaceLanguage=normalizeInterfaceLanguage(language);
     setInterfaceLanguage(this.state.interfaceLanguage);
@@ -574,6 +662,7 @@ module.exports=class LearningHub extends Plugin {
     for(const {el,label} of this.uiRibbonLabels||[]){el.setAttribute('aria-label',tr(label));el.setAttribute('data-tooltip',tr(label));}
     for(const {id,label} of this.uiCommandLabels||[]){const command=this.app.commands?.commands?.[`${this.manifest.id}:${id}`];if(command)command.name=`${this.manifest.name}: ${tr(label)}`;}
     for(const type of [MAIN,NAV,CHAT_VIEW_TYPE])for(const leaf of this.app.workspace.getLeavesOfType(type)){if(leaf.view?.render)await leaf.view.render();leaf.updateHeader?.();}
+    if(this.availabilityModal&&!this.availabilityModal.closed)this.availabilityModal.render();
     this.refreshBlocks();
   }
   async ensureWorkspace(){
@@ -644,7 +733,7 @@ module.exports=class LearningHub extends Plugin {
   async createCourse(semesterId,values){
     const semester=this.state.semesters.find(row=>row.id===semesterId);if(!semester){new Notice(tr("请先选择学期"));return false;}
     const code=String(values.code||'').trim().replace(/\s+/g,' ').toUpperCase(),name=String(values.name||'').trim();
-    if(!/^[A-Z]{4}\s+\d{4}(?:-[A-Z0-9]+)?$/.test(code)){new Notice(tr("课程代码格式示例：COMP 1002"));return false;}
+    if(!/^[A-Z]{4}\s+\d{4}(?:-[A-Z0-9]+)?$/.test(code)){new Notice(tr("课程代码格式示例：COMP 1001"));return false;}
     if(!name){new Notice(tr("请填写课程名称"));return false;}
     const existingCourse=this.courses.find(value=>value.split(' - ')[0].trim().toUpperCase()===code);
     const course=existingCourse||safeSegment(`${code} - ${name}`),folder=`${ROOT}/${course}`;
@@ -660,7 +749,6 @@ module.exports=class LearningHub extends Plugin {
   async ensureCourseFiles(course,name){
     const folder=`${ROOT}/${course}`,existing=this.app.vault.getAbstractFileByPath(folder);
     if(existing&&!Array.isArray(existing.children))throw new Error(tr("课程路径已被同名文件占用：{0}", [folder]));
-    await this.ensureFolder(ROOT);
     if(!existing)await this.app.vault.createFolder(folder);
     const overviewPath=`${folder}/学习概览.md`,indexPath=this.courseIndexPath(course),syllabusPath=`${folder}/Syllabus.md`;
     if(!this.app.vault.getAbstractFileByPath(overviewPath))await this.app.vault.create(overviewPath,`---\ncourse: ${JSON.stringify(course)}\n---\n\n# ${name} · 学习概览\n\n此笔记是课程空间的入口。打开后可管理讲次、预习、主笔记、作业与间隔复习。\n`);
@@ -684,7 +772,7 @@ module.exports=class LearningHub extends Plugin {
     this.refreshBlocks();return target;
   }
   uploadCourseSyllabus(course){
-    const input=document.createElement('input');input.type='file';input.accept='.pdf,.md,.txt';
+    const input=document.createElement('input');input.type='file';input.accept='.pdf,.md,.txt,.ipynb';
     input.onchange=async()=>{const file=input.files?.[0];if(!file)return;try{const sourcePath=await this.saveCourseSyllabusFile(course,file);new CourseInitialModal(this,course,sourcePath).open();}catch(error){console.error('Learning Hub syllabus upload:',error);new Notice(tr("Syllabus 上传失败：{0}", [error.message]),7000);}};
     input.click();
   }
@@ -850,7 +938,7 @@ module.exports=class LearningHub extends Plugin {
     await this.app.vault.adapter.write(path,JSON.stringify(value,null,2)+'\n');
   }
   async ensureFolder(path){const adapter=this.app.vault.adapter,parts=path.split('/');for(let i=1;i<=parts.length;i++){const folder=parts.slice(0,i).join('/');if(!await adapter.exists(folder))await adapter.mkdir(folder);}}
-  async saveFlow(file,flow,refresh=false){await this.writeJson(this.flowPath(file),flow);if(refresh){this.refreshBlocks();await this.refreshNav();}}
+  async saveFlow(file,flow,refresh=false){await this.writeJson(this.flowPath(file),flow);await this.syncLearningTodos();if(refresh){this.refreshBlocks();await this.refreshNav();}}
   reviewPlan(flow){
     return REVIEW_ROUNDS.map((meta,index)=>{
       const record=flow.reviews.rounds[index];
@@ -859,6 +947,23 @@ module.exports=class LearningHub extends Plugin {
       const unlocked=!!due&&due<=today()&&previousDone&&!!flow.recall.completedAt;
       return {...meta,index,round:index+1,due,completedAt:record.completedAt,unlocked};
     });
+  }
+  scaledStudyMinutes(estimatedMinutes,estimatedCount,currentCount){
+    const base=Number(estimatedMinutes);
+    if(!Number.isFinite(base)||base<15)return null;
+    const sourceCount=Number(estimatedCount),count=Number(currentCount);
+    const scaled=Number.isFinite(sourceCount)&&sourceCount>0&&Number.isFinite(count)&&count>0?base*count/sourceCount:base;
+    return Math.max(15,Math.min(240,Math.round(scaled/5)*5));
+  }
+  previewEstimatedMinutes(flow){
+    return this.scaledStudyMinutes(flow?.preview?.estimatedMinutes,flow?.preview?.estimatedConceptCount,flow?.preview?.concepts?.length);
+  }
+  recallEstimatedMinutes(flow){
+    return this.scaledStudyMinutes(flow?.recall?.estimatedMinutes,flow?.recall?.estimatedQuestionCount,flow?.recall?.questions?.length);
+  }
+  reviewEstimatedMinutes(flow,round){
+    const record=flow?.reviews?.rounds?.[round-1];
+    return this.scaledStudyMinutes(record?.estimatedMinutes,record?.estimatedQuestionCount,this.sessionQuestions(flow,'review',round)?.length);
   }
   async logError(file,entry){
     return this.appendError(this.errorPath(file),{lessonPath:file.path},entry);
@@ -894,88 +999,92 @@ module.exports=class LearningHub extends Plugin {
     try{if(await this.app.vault.adapter.exists(path))saved=JSON.parse(await this.app.vault.adapter.read(path));}catch(e){console.warn('Learning Hub assignments:',e);}
     return {version:1,course,assignments:Array.isArray(saved?.assignments)?saved.assignments:[]};
   }
-  async saveAssignments(course,data){await this.writeJson(this.assignmentPath(course),data);this.refreshBlocks();await this.refreshNav();}
+  async saveAssignments(course,data){const changed=data.assignments.map(assignment=>this.syncHomeworkTodo(course,assignment)).some(Boolean);await this.writeJson(this.assignmentPath(course),data);if(changed)await this.saveHomeworkTaskChanges();this.refreshBlocks();await this.refreshNav();}
   labPath(course){return `${ROOT}/${course}/.learning-hub/labs.json`;}
   labDataFolder(course,id){return `${ROOT}/${course}/.learning-hub/labs/${id}`;}
   labContentPath(course,id){return `${this.labDataFolder(course,id)}/content.md`;}
   async readLabs(course){
     let saved={};
-    try{if(await this.app.vault.adapter.exists(this.labPath(course)))saved=JSON.parse(await this.app.vault.adapter.read(this.labPath(course)));}
-    catch(error){console.warn('Learning Hub labs:',error);}
+    try{if(await this.app.vault.adapter.exists?.(this.labPath(course)))saved=JSON.parse(await this.app.vault.adapter.read(this.labPath(course)));}
+    catch(error){throw new Error(tr('无法读取复习资料「{0}」：{1}',[course,error.message]));}
     return {version:1,course,labs:Array.isArray(saved?.labs)?saved.labs:[]};
   }
-  async saveLabs(course,data){await this.writeJson(this.labPath(course),data);this.refreshBlocks();await this.refreshNav();}
-  async refreshLabView(course){for(const leaf of this.app?.workspace?.getLeavesOfType?.(MAIN)||[])if(leaf.view?.page==='assignments'&&leaf.view.course===course)await leaf.view.render();}
+  async saveLabs(course,data){let changed=false;for(const item of data.labs)changed=this.syncPracticeTodo(course,item)||changed;await this.writeJson(this.labPath(course),data);if(changed)await this.saveData(this.state);this.refreshBlocks();await this.refreshNav();}
+  async refreshLabView(course){for(const leaf of this.app?.workspace?.getLeavesOfType?.(MAIN)||[])if(['assignments','practice'].includes(leaf.view?.page)&&leaf.view.course===course)await leaf.view.render();}
   async saveLabFiles(course,files,details){
     const store=await this.readLabs(course),id=crypto.randomUUID();
-    const lab={id,title:details.title,due:details.due||'',lessonPath:details.lessonPath||'',files:[],topics:[],createdAt:now(),archivedAt:null,importStatus:'uploading',analysisStatus:'queued'};
-    const folder=`${ROOT}/${course}/Lab Sessions/${safeSegment(lab.title)}-${id.slice(0,8)}`;
+    const lab={id,kind:details.kind==='tutorial'?'tutorial':'lab',useForReview:details.useForReview!==false,includeTodo:details.includeTodo!==false,title:details.title,due:details.due||'',lessonPath:details.lessonPath||'',files:[],topics:[],createdAt:now(),archivedAt:null,importStatus:'uploading',analysisStatus:'queued'};
+    const folder=`${ROOT}/${course}/${lab.kind==='tutorial'?'Tutorials':'Lab Sessions'}/${safeSegment(lab.title)}-${id.slice(0,8)}`;
     lab.folder=folder;await this.ensureFolder(folder);store.labs.push(lab);await this.saveLabs(course,store);
     const failures=[];
-    for(const file of files){
+    for(const [fileIndex,file] of files.entries()){
       const name=safeSegment(file.name),dot=name.lastIndexOf('.'),stem=dot>0?name.slice(0,dot):name,ext=dot>0?name.slice(dot):'';
-      if(!['.pdf','.md','.txt'].includes(ext.toLowerCase())){failures.push(file.name);continue;}
+      if(!['.pdf','.md','.txt','.ipynb'].includes(ext.toLowerCase())){failures.push(file.name);continue;}
       let target=`${folder}/${name}`,suffix=2;
       while(await this.app.vault.adapter.exists(target))target=`${folder}/${stem} (${suffix++})${ext}`;
-      try{await this.app.vault.createBinary(target,await file.arrayBuffer());lab.files.push({name:file.name,path:target,size:file.size||0});await this.saveLabs(course,store);}
+      try{await this.app.vault.createBinary(target,await file.arrayBuffer());lab.files.push({name:file.name,path:target,size:file.size||0,role:details.fileRoles?.[fileIndex]||sourceRole(file.name)});await this.saveLabs(course,store);}
       catch(error){console.error('Learning Hub lab upload:',error);failures.push(file.name);}
     }
     lab.importStatus=failures.length?'partial':'complete';lab.failedFiles=failures;
-    if(!lab.files.length){lab.analysisStatus='failed';lab.analysisError='没有可解析的 PDF、Markdown 或 TXT 文件。';}
+    if(!lab.files.length){lab.analysisStatus='failed';lab.analysisError=tr('没有可解析的 PDF、Markdown、TXT 或 Notebook 文件。');}
     await this.saveLabs(course,store);
-    new Notice(lab.files.length?tr("已保存 {0} 份 Lab Session 课件{1}", [lab.files.length, failures.length?tr("，{0} 份未导入", [failures.length]):'']):tr("Lab Session 没有成功导入可解析文件"));
+    new Notice(lab.files.length?tr("已保存 {0} 个资料文件{1}", [lab.files.length, failures.length?tr("，{0} 份未导入", [failures.length]):'']):tr("没有成功导入可解析的资料文件"));
     return lab;
   }
-  uploadLab(course){
-    const input=document.createElement('input');input.type='file';input.multiple=true;input.accept='.pdf,.md,.txt';
+  uploadLab(course,kind='lab'){
+    const input=document.createElement('input');input.type='file';input.multiple=true;input.accept='.pdf,.md,.txt,.ipynb';
     input.onchange=()=>{const files=Array.from(input.files||[]);if(!files.length)return;new LabModal(this.app,this,course,files,null,async details=>{
       const lab=await this.saveLabFiles(course,files,details);
-      if(lab.files.length)void this.analyzeLab(course,lab.id).catch(error=>{console.error('Learning Hub lab AI:',error);new Notice(tr("Lab Session 已保存；解析失败：{0}", [error.message]),7000);});
+      if(lab.files.length)void this.analyzeLab(course,lab.id).catch(error=>{console.error('Learning Hub lab AI:',error);new Notice(tr("资料已保存；解析失败：{0}", [error.message]),7000);});
       await this.refreshLabView(course);
-    }).open();};input.click();
+    },kind).open();};input.click();
   }
-  editLab(course,lab){new LabModal(this.app,this,course,[],lab,async details=>{const store=await this.readLabs(course),target=store.labs.find(item=>item.id===lab.id);if(!target)throw new Error(tr("Lab Session 不存在"));Object.assign(target,details);await this.saveLabs(course,store);await this.refreshLabView(course);}).open();}
+  editLab(course,lab){new LabModal(this.app,this,course,[],lab,async details=>{const store=await this.readLabs(course),target=store.labs.find(item=>item.id===lab.id);if(!target)throw new Error(tr("资料已不存在"));const {fileRoles,...metadata}=details;const changedRoles=target.files.some((file,i)=>(file.role||sourceRole(file.name))!==fileRoles[i]);Object.assign(target,metadata);target.files.forEach((file,i)=>{file.role=fileRoles[i];});if(changedRoles){target.analysisStale=true;}await this.saveLabs(course,store);await this.refreshLabView(course);}).open();}
   async labSourceText(lab){
     const sources=[];
     for(const file of lab.files||[]){
       const extension=file.path?.split('.').at(-1)?.toLowerCase();
-      if(!['pdf','md','txt'].includes(extension))continue;
+      if(!['pdf','md','txt','ipynb'].includes(extension))continue;
       try{
-        const text=extension==='pdf'?await extractPdfText(path.join(this.vaultPath(),file.path),this.state.ai.pdfExtractor):String(await this.app.vault.adapter.read(file.path));
-        if(text.trim())sources.push({name:file.name,text});
+        const text=extension==='pdf'?await extractPdfText(path.join(this.vaultPath(),file.path),this.state.ai.pdfExtractor):extension==='ipynb'?notebookText(await this.app.vault.adapter.read(file.path)):String(await this.app.vault.adapter.read(file.path));
+        if(text.trim())sources.push({name:`${file.name} [role: ${file.role||sourceRole(file.name)}]`,text});
       }catch(error){throw new Error(tr("无法解析「{0}」：{1}", [file.name,error.message]));}
     }
-    if(!sources.length)throw new Error(tr("Lab Session 没有可提取的文字；扫描版 PDF 需要先 OCR。"));
+    if(!sources.length)throw new Error(tr("资料没有可提取的文字；扫描版 PDF 需要先 OCR。"));
     return combineHomeworkTexts(sources);
   }
   async analyzeLab(course,id){
     this.labRunning||=new Set();if(this.labRunning.has(id))return;
-    this.labRunning.add(id);
+    this.labRunning.add(id);this.labControllers||=new Map();const controller=new AbortController();this.labControllers.set(id,controller);
     try{
       let store=await this.readLabs(course),lab=store.labs.find(item=>item.id===id);if(!lab)return;
       lab.analysisStatus='extracting';lab.analysisError='';await this.saveLabs(course,store);await this.refreshLabView(course);
-      const sourceText=await this.labSourceText(lab);
+      const sourceRolesBefore=JSON.stringify(lab.files.map(file=>file.role||sourceRole(file.name)));const sourceText=await this.labSourceText(lab);
       store=await this.readLabs(course);lab=store.labs.find(item=>item.id===id);if(!lab)return;
-      lab.analysisStatus='analyzing';await this.saveLabs(course,store);await this.refreshLabView(course);
-      const result=validateLabDraft(await this.runAi(labPrompt({course,title:lab.title,sourceText,language:this.state.ai.language}),labSchema,{timeoutMs:8*60*1000}));
+      const sourceRoles=sourceRolesBefore;lab.analysisStatus='analyzing';await this.saveLabs(course,store);await this.refreshLabView(course);
+      this.labProgress||=new Map();const progress={startedAt:Date.now(),codexPhase:'queued',tokenUsage:null};this.labProgress.set(id,progress);await this.refreshLabView(course);
+      const result=validatePractice(await this.runAi(practicePrompt({course,title:lab.title,kind:materialKind(lab),sourceText,language:this.state.ai.language}),practiceSchema,{timeoutMs:8*60*1000,signal:controller.signal,onStatus:phase=>{progress.codexPhase=phase;this.updateHomeworkProgress(progress);},onTokenUsage:usage=>{progress.tokenUsage=usage;this.updateHomeworkProgress(progress);}}));
       store=await this.readLabs(course);lab=store.labs.find(item=>item.id===id);if(!lab)return;
+      if(JSON.stringify(lab.files.map(file=>file.role||sourceRole(file.name)))!==sourceRoles)throw new Error(tr('资料类型已修改，请重新解析。'));
       await this.ensureFolder(this.labDataFolder(course,id));
-      await this.app.vault.adapter.write(this.labContentPath(course,id),result.markdown+'\n');
-      lab.topics=result.topics;lab.analysisStatus='complete';lab.analysisError='';lab.analyzedAt=now();
+      await this.app.vault.adapter.write(this.labContentPath(course,id),result.markdown+'\n');await this.writeJson(this.practiceAnalysisPath(course,id),result);
+      lab.topics=result.topics;lab.estimatedMinutes=result.estimatedMinutes;lab.questionCount=result.questions.length;lab.analysisStale=false;lab.analysisStatus='complete';lab.analysisError='';lab.analyzedAt=now();
       await this.saveLabs(course,store);await this.refreshLabView(course);
       new Notice(tr("《{0}》已解析完成。", [lab.title]));
-    }catch(error){const store=await this.readLabs(course),lab=store.labs.find(item=>item.id===id);if(lab){lab.analysisStatus='failed';lab.analysisError=error.message;await this.saveLabs(course,store);await this.refreshLabView(course);}throw error;}
-    finally{this.labRunning.delete(id);}
+    }catch(error){if(controller.signal.aborted||this.unloaded)return;const store=await this.readLabs(course),lab=store.labs.find(item=>item.id===id);if(lab){lab.analysisStatus='failed';lab.analysisError=error.message;await this.saveLabs(course,store);await this.refreshLabView(course);}throw error;}
+    finally{this.labRunning.delete(id);this.labProgress?.delete(id);this.labControllers?.delete(id);}
   }
   async toggleLabArchive(course,id){const store=await this.readLabs(course),lab=store.labs.find(item=>item.id===id);if(!lab)return;lab.archivedAt=lab.archivedAt?null:now();await this.saveLabs(course,store);await this.refreshLabView(course);}
   async deleteLab(course,id){
+    this.labControllers?.get(id)?.abort();
     const store=await this.readLabs(course),lab=store.labs.find(item=>item.id===id);if(!lab)return;
-    if(lab.folder?.startsWith(`${ROOT}/${course}/Lab Sessions/`)){const folder=this.app.vault.getAbstractFileByPath(lab.folder);if(folder)await this.app.vault.trash(folder,false);}
+    if(lab.folder?.startsWith(`${ROOT}/${course}/Lab Sessions/`)||lab.folder?.startsWith(`${ROOT}/${course}/Tutorials/`)){const folder=this.app.vault.getAbstractFileByPath(lab.folder);if(folder)await this.app.vault.trash(folder,false);}
     const hidden=this.labDataFolder(course,id);
     if(await this.app.vault.adapter.exists(hidden)){const deleted=`${ROOT}/${course}/.learning-hub/deleted-labs`;await this.ensureFolder(deleted);await this.app.vault.adapter.rename(hidden,`${deleted}/${id}-${Date.now()}`);}
-    store.labs=store.labs.filter(item=>item.id!==id);await this.saveLabs(course,store);await this.refreshLabView(course);
+    this.syncPracticeTodo(course,{...lab,deleted:true});await this.filterErrorLog(this.courseErrorPath(course),item=>item.sourceMaterialId!==id);store.labs=store.labs.filter(item=>item.id!==id);await this.saveData(this.state);await this.saveLabs(course,store);await this.refreshLabView(course);
     new Notice(tr("已删除《{0}》；原文件已移入 Obsidian 回收站。", [lab.title]));
   }
+  confirmDeletePractice(course,item){new ConfirmModal(this.app,tr('删除这份练习资料？'),tr('原文件会移入 Obsidian 回收站，关联待办和未完成安排会移除。'),tr('确认删除'),async()=>{await this.deleteLab(course,item.id);await this.openHub('assignments',course);}).open();}
   async saveHomeworkFiles(course,files,details){
     const store=await this.readAssignments(course),id=crypto.randomUUID();
     const assignment={id,title:details.title,due:details.due||'',difficulty:null,topics:[],lessonPath:details.lessonPath||'',files:[],createdAt:now(),archivedAt:null,importStatus:'uploading',analysisStatus:'queued',wrongQuestionIds:[],wrongLogPaths:[]};
@@ -1007,12 +1116,12 @@ module.exports=class LearningHub extends Plugin {
   editHomework(course,assignment){new HomeworkModal(this.app,this,course,[],assignment,async details=>{const store=await this.readAssignments(course);const target=store.assignments.find(a=>a.id===assignment.id);if(!target)throw Error('Assignment missing');Object.assign(target,details,{metadataSource:'manual'});const taskChanged=this.syncHomeworkTodo(course,target);await this.saveAssignments(course,store);if(taskChanged)await this.saveHomeworkTaskChanges();}).open();}
   syncHomeworkTodo(course,assignment){
     const linked=this.state.tasks.find(task=>task.assignmentId===assignment.id||task.id===assignment.taskId);
-    if(!assignment.due){assignment.taskId='';if(!linked)return false;this.state.tasks=this.state.tasks.filter(task=>task.id!==linked.id);this.state.slots=this.state.slots.filter(slot=>slot.taskId!==linked.id);return true;}
-    if(!validDate(assignment.due))throw new Error(tr("作业截止日期无效。"));
+    if(assignment.deleted||!(assignment.files||[]).length){assignment.taskId='';if(!linked)return false;this.state.tasks=this.state.tasks.filter(task=>task.id!==linked.id);this.state.slots=this.state.slots.filter(slot=>slot.taskId!==linked.id);return true;}
+    if(assignment.due&&!validDate(assignment.due))throw new Error(tr("作业截止日期无效。"));
     const title=`完成作业：${assignment.title}`;
-    const taskValues={assignmentId:assignment.id,title,due:assignment.due,dueTime:'',course,lessonPath:assignment.lessonPath||'',kind:'task',minutes:estimateMinutes({title,kind:'task'},this.state.completionHistory),source:'作业'};
-    if(linked){const changed=['title','due','course','lessonPath','minutes'].some(key=>linked[key]!==taskValues[key]);Object.assign(linked,taskValues);assignment.taskId=linked.id;return changed;}
-    const task={...taskValues,id:crypto.randomUUID(),status:'unfinished',done:false,createdAt:now()};
+    const taskValues={assignmentId:assignment.id,title,due:assignment.due||'',dueTime:'',course,lessonPath:assignment.lessonPath||'',kind:'task',aiEstimatedMinutes:Number(assignment.estimatedMinutes)||null,aiEstimateStatus:assignment.estimatedMinutes?'complete':['failed','complete'].includes(assignment.analysisStatus)?'unavailable':'pending',minutes:estimateMinutes({title,kind:'task',estimatedMinutes:linked?.estimatedMinutes,aiEstimatedMinutes:assignment.estimatedMinutes},this.state.completionHistory),source:'作业'};
+    if(linked){const changed=['title','due','course','lessonPath','minutes','aiEstimatedMinutes','aiEstimateStatus'].some(key=>linked[key]!==taskValues[key]);Object.assign(linked,taskValues);assignment.taskId=linked.id;return changed;}
+    const task={...taskValues,id:assignment.taskId||crypto.randomUUID(),status:'unfinished',done:false,createdAt:now()};
     this.state.tasks.push(task);assignment.taskId=task.id;return true;
   }
   async saveHomeworkTaskChanges(){
@@ -1033,9 +1142,10 @@ module.exports=class LearningHub extends Plugin {
         progress.startedAt=Date.now();progress.codexPhase='queued';progress.receivedChars=0;progress.tokenUsage=null;progress.reasoningSummary='';progress.reasoningIndex=null;
       }else if(status==='extracting'){progress.startedAt=Date.now();progress.codexPhase='extracting';progress.receivedChars=0;}
     }
-    await this.writeJson(this.assignmentPath(course),store);
+    const taskChanged=this.syncHomeworkTodo(course,assignment);
+    await this.writeJson(this.assignmentPath(course),store);if(taskChanged)await this.saveHomeworkTaskChanges();
     const statusEl=this.homeworkStatusEls?.get(id);
-    if(statusEl){statusEl.empty();this.renderHomeworkStatus(statusEl,assignment);}
+    if(statusEl){statusEl.empty();this.renderHomeworkStatus(statusEl,{...assignment,course});}
     if(progress)this.updateHomeworkProgress(progress);
     if(status==='failed')this.refreshBlocks();
     return assignment;
@@ -1044,7 +1154,7 @@ module.exports=class LearningHub extends Plugin {
     const sources=[],files=assignment.files||[];
     for(const item of files){
       const extension=item.path?.split('.').at(-1)?.toLowerCase();
-      if(!['pdf','md','txt'].includes(extension))continue;
+      if(!['pdf','md','txt','ipynb'].includes(extension))continue;
       try{
         const text=extension==='pdf'?await extractPdfText(path.join(this.vaultPath(),item.path),this.state.ai.pdfExtractor):String(await this.app.vault.adapter.read(item.path));
         if(text.trim())sources.push({name:item.name,text});
@@ -1071,7 +1181,7 @@ module.exports=class LearningHub extends Plugin {
     const seconds=Math.floor((Date.now()-progress.startedAt)/1000),duration=`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;
     const received=progress.receivedChars?tr(" · 已接收 {0} 字符", [progress.receivedChars.toLocaleString()]):'';
     progress.elapsedEl?.setText(tr("{0} · 已用时 {1}{2}", [labels[progress.codexPhase]||labels.queued, duration, received]));
-    progress.usageEl?.setText(progress.tokenUsage?formatCodexUsage(progress.tokenUsage):'');
+    renderTokenUsage(progress.usageEl,progress.tokenUsage);
   }
   renderHomeworkReasoning(progress){
     const host=progress?.reasoningEl;if(!host)return;
@@ -1099,20 +1209,23 @@ module.exports=class LearningHub extends Plugin {
       progress.sourcePath=assignment.files?.[0]?.path||'';
       const sourceText=await this.homeworkSourceText(assignment);
       if(!await this.setHomeworkAnalysisStatus(course,id,'organizing'))return;
-      const organized=validateOrganizedHomework(await this.runAi(organizeHomeworkPrompt({course,title:assignment.title,sourceText,language:this.state.ai.language}),organizeSchema,{timeoutMs:8*60*1000,...this.homeworkAiCallbacks(progress)}));
+      const previousAnalysis=await this.readHomeworkAnalysis(course,id);
+      const organized=validateOrganizedHomework(await this.runAi(organizeHomeworkPrompt({course,title:assignment.title,sourceText,language:this.state.ai.language}),organizeSchema,{timeoutMs:8*60*1000,...this.homeworkAiCallbacks(progress)}),previousAnalysis?.questions||[]);
       if(this.homeworkCancelled.has(id))return;
       await this.ensureFolder(this.homeworkDataFolder(course,id));
       await this.app.vault.adapter.write(this.homeworkContentPath(course,id),organized.markdown+'\n');
       if(!await this.setHomeworkAnalysisStatus(course,id,'analyzing'))return;
       const analysis=validateHomeworkAnalysis(await this.runAi(analyzeHomeworkPrompt({course,title:assignment.title,markdown:organized.markdown,questions:organized.questions,language:this.state.ai.language}),analyzeSchema,{timeoutMs:8*60*1000,...this.homeworkAiCallbacks(progress)}),organized.questions);
       if(this.homeworkCancelled.has(id))return;
-      await this.writeJson(this.homeworkAnalysisPath(course,id),{version:1,assignmentId:id,sourcePaths:assignment.files.map(file=>file.path),generatedAt:now(),difficulty:analysis.difficulty,topics:analysis.topics,questions:analysis.questions});
+      await this.writeJson(this.homeworkAnalysisPath(course,id),{version:1,assignmentId:id,sourcePaths:assignment.files.map(file=>file.path),generatedAt:now(),difficulty:analysis.difficulty,topics:analysis.topics,estimatedMinutes:analysis.estimatedMinutes,estimateReason:analysis.estimateReason,questions:analysis.questions});
       const store=await this.readAssignments(course),target=store.assignments.find(item=>item.id===id);
       if(!target||this.homeworkCancelled.has(id))return;
       if(target.metadataSource!=='manual'){target.difficulty=analysis.difficulty;target.topics=analysis.topics;target.metadataSource='ai';}
+      target.estimatedMinutes=analysis.estimatedMinutes;target.estimateReason=analysis.estimateReason;
+      const questionIds=new Set(flattenHomeworkQuestions(analysis.questions).map(q=>q.id));target.wrongQuestionIds=(target.wrongQuestionIds||[]).filter(id=>questionIds.has(id));
       target.analysisStatus='complete';target.analysisError='';target.analyzedAt=now();
       await this.saveAssignments(course,store);
-      new Notice(tr("《{0}》的题目、难度与知识点已整理完成。", [target.title]),6000);
+      new Notice(tr("《{0}》的题目、知识点和预计用时已整理完成。", [target.title]),6000);
     }catch(error){
       if(!this.homeworkCancelled.has(id))await this.setHomeworkAnalysisStatus(course,id,'failed',error.message);
       throw error;
@@ -1127,16 +1240,22 @@ module.exports=class LearningHub extends Plugin {
   }
   async toggleHomeworkArchive(course,id){const store=await this.readAssignments(course),item=store.assignments.find(a=>a.id===id);if(!item)return;item.archivedAt=item.archivedAt?null:now();await this.saveAssignments(course,store);}
   async setHomeworkWrongQuestion(course,id,questionId,wrong){
+    this.homeworkWrongUpdates||=new Map();const key=`${course}/${id}`;
+    const pending=(this.homeworkWrongUpdates.get(key)||Promise.resolve()).catch(()=>{}).then(()=>this.updateHomeworkWrongQuestion(course,id,questionId,wrong));
+    this.homeworkWrongUpdates.set(key,pending);
+    try{return await pending;}finally{if(this.homeworkWrongUpdates.get(key)===pending)this.homeworkWrongUpdates.delete(key);}
+  }
+  async updateHomeworkWrongQuestion(course,id,questionId,wrong){
     const store=await this.readAssignments(course),assignment=store.assignments.find(item=>item.id===id);
     if(!assignment)throw new Error(tr("作业已不存在。"));
-    const analysis=await this.readHomeworkAnalysis(course,id),question=analysis?.questions?.find(item=>item.id===questionId);
+    const analysis=await this.readHomeworkAnalysis(course,id),question=flattenHomeworkQuestions(analysis?.questions||[]).find(item=>item.id===questionId);
     if(!question)throw new Error(tr("找不到这道题。"));
     const marked=new Set(assignment.wrongQuestionIds||[]);
     if(marked.has(questionId)===wrong)return;
     const lesson=assignment.lessonPath?asFile(this.app,assignment.lessonPath):null;
     const logPath=lesson?this.errorPath(lesson):this.courseErrorPath(course);
     if(wrong){
-      await this.appendError(logPath,lesson?{lessonPath:lesson.path}:{course},{questionId,sourceAssignmentId:id,sourceAssignmentTitle:assignment.title,sourceFilePaths:(assignment.files||[]).map(file=>file.path),sourceLessonPath:lesson?.path||'',mode:'homework',rating:'incorrect',prompt:question.markdown,answer:'',reference:'',topic:question.topics?.join('、')||assignment.topics?.[0]||''});
+      await this.appendError(logPath,lesson?{lessonPath:lesson.path}:{course},{questionId,sourceAssignmentId:id,sourceAssignmentTitle:assignment.title,sourceFilePaths:(assignment.files||[]).map(file=>file.path),sourceLessonPath:lesson?.path||'',mode:'homework',rating:'incorrect',questionLabel:question.label,parentQuestionId:question.parentQuestionId||'',parentQuestionLabel:question.parentQuestionLabel||'',prompt:homeworkWrongPrompt(question),answer:'',reference:'',topic:question.topics?.join('、')||assignment.topics?.[0]||''});
       marked.add(questionId);
       assignment.wrongLogPaths=[...new Set([...(assignment.wrongLogPaths||[]),logPath])];
     }else{
@@ -1148,7 +1267,7 @@ module.exports=class LearningHub extends Plugin {
   }
   async deleteHomework(course,id){
     const store=await this.readAssignments(course),assignment=store.assignments.find(item=>item.id===id);if(!assignment)return;
-    const taskChanged=this.syncHomeworkTodo(course,{...assignment,due:''});
+    const taskChanged=this.syncHomeworkTodo(course,{...assignment,deleted:true});
     this.homeworkCancelled||=new Set();this.homeworkCancelled.add(id);
     const firstPath=assignment.files?.[0]?.path||'';
     const folder=assignment.folder||(firstPath?firstPath.slice(0,firstPath.lastIndexOf('/')):'');
@@ -1196,16 +1315,17 @@ module.exports=class LearningHub extends Plugin {
   }
   async refreshNav(){if(this.nav?.render)await this.nav.render();}
   refreshBlocks(){clearTimeout(this.refreshTimer);this.refreshTimer=setTimeout(()=>{for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(!['preview','recall','review'].includes(leaf.view?.page))void leaf.view?.render?.();},350);}
-  async openHub(page,course,preferredLeaf,lessonPath=null,round=0){
+  async openHub(page,course,preferredLeaf,lessonPath=null,round=0,assignmentId=null){
     const mains=this.app.workspace.getLeavesOfType(MAIN);
     let leaf=preferredLeaf||(this.lastMainLeaf&&mains.includes(this.lastMainLeaf)?this.lastMainLeaf:null)||mains[0];
     if(!leaf){try{leaf=this.app.workspace.getLeaf('tab');}catch(_){leaf=this.app.workspace.getLeaf(true);}}
     if(!leaf)return;
     await leaf.loadIfDeferred?.();
-    if(leaf.view?.getViewType?.()!==MAIN)await leaf.setViewState({type:MAIN,active:true,state:{page,course,lessonPath,round}});
-    const view=leaf.view;if(view?.getViewType?.()===MAIN&&(view.page!==page||view.course!==course||view.lessonPath!==lessonPath||view.round!==round))await view.setPage(page,course,lessonPath,round);
+    if(leaf.view?.getViewType?.()!==MAIN)await leaf.setViewState({type:MAIN,active:true,state:{page,course,lessonPath,round,assignmentId}});
+    const view=leaf.view;if(view?.getViewType?.()===MAIN&&(view.page!==page||view.course!==course||view.lessonPath!==lessonPath||view.round!==round||view.assignmentId!==assignmentId))await view.setPage(page,course,lessonPath,round,assignmentId);
     this.navigationCourse=course||null;this.lastMainLeaf=leaf;
     await this.app.workspace.revealLeaf(leaf);
+    this.app.workspace.setActiveLeaf?.(leaf,{focus:true});
     this.lastContentLeaf=leaf;this.refreshChatContext();
     if(page!=='preview'&&this.pdfLeaf&&this.pdfLeaf!==leaf&&this.pdfLeaf.view?.file?.path===this.pdfPath){this.pdfLeaf.detach();this.pdfLeaf=null;this.pdfPath=null;}
     await this.refreshNav();
@@ -1283,10 +1403,11 @@ module.exports=class LearningHub extends Plugin {
     let lessonTitle='';
     if(lesson){const flow=await this.readFlow(lesson);preview=includeContent?flow.preview:null;lessonTitle=flow.lessonTitle||lesson.basename;if(includeContent)errors=await this.readErrorEntries(this.errorPath(lesson));}
     if(includeContent&&course)errors.push(...await this.readErrorEntries(this.courseErrorPath(course)));
-    const pageLabels={home:'学习主页',schedule:'完整日程',tasks:'待办事项',retrospect:'学习复盘',drafts:'草稿本',course:'课程概览 · {0}',assignments:'作业与 Lab Session · {0}'};
+    const pageLabels={home:'学习主页',schedule:'完整日程',tasks:'待办事项',retrospect:'学习复盘',drafts:'草稿本',course:'课程概览 · {0}',assignments:'作业与练习 · {0}',homework:'作业详情 · {0}',practice:'练习资料 · {0}'};
     const label=isMain&&!['lesson','preview','recall','review'].includes(view.page)?translate(this.state.deepseek?.language||this.state.interfaceLanguage,pageLabels[view.page]||'学习主页',[course?.split(' - ')[0]||'']):[course?.split(' - ')[0],contextFile?.basename||lessonTitle].filter(Boolean).join(' · ');
     const contextPath=contextFile?.path||(isMain?({home:HOME,schedule:SCHEDULE,tasks:TASKS,retrospect:RETROSPECT}[view.page]||''):'');
-    return {course,lesson:lessonTitle,lessonPath:lesson?.path||'',selectedText,note,preview,errors,label,path:contextPath,readError};
+    const practiceMaterials=includeContent&&course&&(lesson||isMain&&view.page==='practice')?await this.reviewPracticeMaterials(course,lesson?.path||'',view.page==='practice'?view.assignmentId:null):[];
+    return {course,lesson:lessonTitle,lessonPath:lesson?.path||'',selectedText,note,preview,errors,practiceMaterials,label,path:contextPath,readError};
   }
   async recordChatMisconception({question,answer,course,lessonPath,conversationId,messageId}){
     if(!this.state.deepseek.apiKey||String(question||'').trim().length<8)return false;
@@ -1309,14 +1430,16 @@ module.exports=class LearningHub extends Plugin {
   async callDeepSeek(options={}){
     const {apiKey:_apiKey,endpoint:_endpoint,model,languageScope,...request}=options||{};
     const settings=this.state.deepseek||{};
-    request.systemPrompt=`${request.systemPrompt||DEFAULT_SYSTEM_PROMPT}\n\n${generationLanguageInstruction(languageScope==='assistant'?settings.language:this.state.ai?.language)}`;
+    request.systemPrompt=`${request.systemPrompt||DEFAULT_SYSTEM_PROMPT}\n\n${languageScope==='system'?systemLanguageInstruction(this.state.interfaceLanguage):generationLanguageInstruction(languageScope==='assistant'?settings.language:this.state.ai?.language)}`;
     if(languageScope==='assistant')try{let timer;try{await Promise.race([this.refreshDeepSeekPricing(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Pricing timeout')),6000);})]);}finally{clearTimeout(timer);}}catch{/* Keep the last verified price; every estimate records its verification date. */}
     return this.deepseekClient.chat({...request,apiKey:settings.apiKey,endpoint:settings.endpoint,model:model||settings.model||'deepseek-flash'});
   }
   allScheduleSlots({busyOnly=false}={}){
     const events=this.state.googleCalendar?.events||[];
     const pending=this.state.googleCalendar?.pendingEvents||[];
-    return [...this.state.slots,...(busyOnly?calendarBlocks(events,this.state.calendarChoices):[...events,...pending])];
+    const calendar=busyOnly?calendarBlocks(events,this.state.calendarChoices):[...events,...pending];
+    const profile=expandProfileActivities(this.state.ai,Array.from({length:7},(_,i)=>addDays(today(),i))).filter(block=>(busyOnly||block.visible!==false)&&(!block.classAnchor||!events.some(event=>matchesClassAnchor(event,block))));
+    return [...this.state.slots,...profile,...calendar];
   }
   overdueScheduleSlots(){
     const currentTime=localNow();
@@ -1343,43 +1466,37 @@ module.exports=class LearningHub extends Plugin {
     if(changed.size)this.state.completionHistory=history;
     return changed.size>0;
   }
-  async previewScheduleTasks(){
-    const tasks=[];
-    const calendarEvents=this.state.googleCalendar?.events||[];
-    const events=calendarEvents.filter(event=>event.start>=localNow()&&classifyCalendarEvent(event,this.state.calendarChoices).type==='lec').sort((a,b)=>a.start.localeCompare(b.start));
-    const seen=new Set();
-    for(const event of events){
-      const course=this.courseForEvent(event),code=course?.split(' - ')[0]||'';
-      if(!course||seen.has(course))continue;seen.add(course);
-      const lessons=this.lessons(course),dated=await Promise.all(lessons.map(async file=>({file,date:(file.basename.match(/@(\d{4}) (\d{2}) (\d{2})/)||[]).slice(1).join('-'),flow:await this.readFlow(file)})));
-      const previousIndex=dated.reduce((index,item,i)=>(item.date&&item.date<event.start.slice(0,10)&&item.date<=today()||item.flow.milestones.learnedAt)?i:index,-1);
-      if(previousIndex<0)continue;
-      const previous=dated[previousIndex],next=dated[previousIndex+1]||null;
-      if(!previous.flow.milestones.learnedAt||next?.flow.milestones.previewedAt)continue;
-      const latestPast=calendarEvents.filter(item=>item.end<=localNow()&&classifyCalendarEvent(item,this.state.calendarChoices).type==='lec'&&this.courseForEvent(item)===course).sort((a,b)=>a.end.localeCompare(b.end)).at(-1);
-      if(latestPast&&localTimestamp(previous.flow.milestones.learnedAt,this.state.ai.timezone||'Asia/Shanghai')<latestPast.end)continue;
-      tasks.push({id:`preview:${next?.file.path||event.id}`,title:`${code} ${next?.file.basename||'下一次 Lec'} · 预习`,minutes:estimateMinutes({title:'预习',kind:'preview'},this.state.completionHistory),due:event.start.slice(0,10),before:event.start,source:course,kind:'preview',lessonPath:next?.file.path||'',course});
+  async courseStudyTasks(startDate=today(),days=7){
+    const records=[];
+    for(const course of this.courses)for(const file of this.lessons(course)){
+      const flow=await this.readFlow(file);records.push({file,flow,course,inScope:this.scope(file,course),plan:this.reviewPlan(flow),previewMinutes:this.previewEstimatedMinutes(flow),recallMinutes:this.recallEstimatedMinutes(flow),reviewMinutes:[1,2,3].map(round=>this.reviewEstimatedMinutes(flow,round))});
     }
-    return tasks;
+    const dates=Array.from({length:days+1},(_,i)=>addDays(startDate,i)),profileActivities=expandProfileActivities(this.state.ai,dates);
+    const calendar=this.state.googleCalendar?.events||[];
+    const anchors=profileActivities.filter(block=>block.classAnchor&&(!block.classType||block.classType==='lec')&&!/^(PE|Physical Education)\b/i.test(block.title)&&!calendar.some(event=>matchesClassAnchor(event,block))).map(block=>({...block,classType:'lec'}));
+    return {...existingLessonStudyTasks(collectCourseStudyTasks({courses:this.courses,events:[...calendar,...anchors],choices:this.state.calendarChoices,records,currentLocal:localNow(),startDate,endDate:addDays(startDate,days-1),slots:this.state.slots,profileActivities}),records),records};
   }
-  async scheduleInputs(startDate=today(),days=7){
-    const reviewTasks=await this.reviewScheduleTasks(),previewTasks=await this.previewScheduleTasks();
-    const tasks=this.state.tasks.map(task=>({...task,before:task.due&&task.dueTime?`${task.due}T${task.dueTime}`:task.before||'',done:taskStatus(task)!=='unfinished',minutes:Number(task.minutes)||estimateMinutes(task,this.state.completionHistory)}));
-    return buildScheduleRequest({settings:this.state.ai,tasks,reviewTasks:[...reviewTasks,...previewTasks],slots:this.allScheduleSlots({busyOnly:true}),startDate,days});
+  async syncLearningTodos(){
+    if(!this.courses||!this.state?.tasks)return;
+    if(this.learningTodoSync)return this.learningTodoSync;
+    this.learningTodoSync=(async()=>{const study=await this.courseStudyTasks();const next=reconcileLearningTodos({previous:this.state.tasks,study,records:study.records,date:today(),currentLocal:localNow(),dismissedIds:this.state.dismissedLearningTodoIds||[]});if(JSON.stringify(next)!==JSON.stringify(this.state.tasks)){this.state.tasks=next;await this.saveData(this.state);}return study;})();
+    try{return await this.learningTodoSync;}finally{this.learningTodoSync=null;}
+  }
+  async previewScheduleTasks(startDate=today(),days=7){return (await this.courseStudyTasks(startDate,days)).previews;}
+  async scheduleInputs(startDate=today(),days=7,{adjust=false}={}){
+    await this.syncLearningTodos();
+    const study=await this.courseStudyTasks(startDate,days);
+    const overrides=new Map(this.state.tasks.filter(task=>task.learningManaged).map(task=>[task.id,task]));
+    const dismissed=new Set(this.state.dismissedLearningTodoIds||[]);
+    const courseTasks=[...study.reviews,...study.previews].filter(task=>!dismissed.has(task.id)).map(task=>{const saved=overrides.get(task.id);return saved?{...task,title:saved.title,description:saved.description,urgent:saved.urgent,pinned:saved.pinned,estimatedMinutes:saved.estimatedMinutes,minutes:Number(saved.estimatedMinutes)||task.minutes,done:taskStatus(saved)!=='unfinished'}:task;});
+    const courseIds=new Set(courseTasks.map(task=>task.id));
+    courseTasks.push(...this.state.tasks.filter(task=>task.learningManaged&&!courseIds.has(task.id)&&!task.before&&task.kind==='preview'&&taskStatus(task)==='unfinished'));
+    const tasks=this.state.tasks.filter(task=>!task.learningManaged).map(task=>({...task,before:!isLongTerm(task)&&task.due&&task.dueTime?`${task.due}T${task.dueTime}`:task.before||'',done:taskStatus(task)!=='unfinished',minutes:Number(task.estimatedMinutes)||Number(task.minutes)||estimateMinutes(task,this.state.completionHistory),practicedMinutesByDate:Object.fromEntries(Array.from({length:days},(_,i)=>{const date=addDays(startDate,i),history=this.state.completionHistory.filter(row=>(row.projectId===task.id||row.taskId===task.id)&&row.completedAt?.slice(0,10)===date);return [date,history.reduce((sum,row)=>sum+(Number(row.actualMinutes)||Number(row.estimatedMinutes)||0),0)];}))}));
+    return buildScheduleRequest({settings:{...this.state.ai,language:normalizeInterfaceLanguage(this.state.interfaceLanguage),confirmedDates:adjust?[]:this.state.ai.confirmedDates},tasks,reviewTasks:courseTasks,slots:this.allScheduleSlots({busyOnly:true}),startDate,days,courseCoverage:study.coverage});
   }
   async updateRollingSchedule(){
-    if(this.rollingPromise)return this.rollingPromise;
-    this.rollingPromise=(async()=>{
-      const request=await this.scheduleInputs();
-      const current=localNow(),existing=this.state.slots.filter(slot=>slot.source!=='system-schedule'||slot.end>current);
-      const result=planIncrementally({request,existing,now:current});
-      if(result.added||JSON.stringify(result.slots)!==JSON.stringify(this.state.slots)||this.state.lastPlannedDay!==today()){
-        this.state.slots=result.slots;this.state.lastPlannedDay=today();this.state.unscheduledTasks=result.unscheduled;
-        await this.save();
-      }
-      return result;
-    })();
-    try{return await this.rollingPromise;}finally{this.rollingPromise=null;}
+    // Kept for existing task/calendar callers; formal plans change only on confirmation.
+    await this.syncLearningTodos();this.refreshBlocks();return {slots:this.state.slots,unscheduled:[],added:0};
   }
   async connectGoogleCalendar(){
     const config=this.state.googleCalendar;
@@ -1403,6 +1520,7 @@ module.exports=class LearningHub extends Plugin {
         const start=new Date(Date.now()-86400000).toISOString();
         const end=new Date(Date.now()+35*86400000).toISOString();
         const events=await this.googleCalendarClient.listEvents({...config,calendars},selected,start,end,this.state.ai.timezone||'Asia/Shanghai',saveTokens);
+        this.state.calendarChoices=applyCalendarAttendanceRules(events,this.state.calendarChoices,this.state.calendarAttendanceRules);
         config.pendingEvents=retainPendingCalendarEvents(config.events,config.pendingEvents,events,{choices:this.state.calendarChoices,outcomes:this.state.eventOutcomes,now:localNow()});
         config.calendars=calendars;config.calendarIds=selected;config.events=events;config.syncedAt=new Date().toISOString();config.error='';
         await this.saveData(this.state);this.refreshBlocks();if(Array.isArray(this.courses))void this.updateRollingSchedule().catch(error=>console.warn('Learning Hub calendar replan:',error));
@@ -1429,16 +1547,17 @@ module.exports=class LearningHub extends Plugin {
     const onStatus=phase=>{if(phase==='generating'||phase==='thinking'||phase==='receiving')started=true;try{options.onStatus?.(phase);}catch(error){console.warn('Learning Hub Codex status callback:',error);}};
     const onTokenUsage=usage=>{tokenUsage=usage;try{options.onTokenUsage?.(usage);}catch(error){console.warn('Learning Hub Codex usage callback:',error);}};
     try{return await this.getAiClient().runStructured({prompt,schema,model:ai.model||undefined,effort:ai.effort||undefined,...options,onStatus,onTokenUsage});}
-    finally{if(tokenUsage||started)new Notice(formatCodexUsage(tokenUsage),12000);}
+    finally{if(tokenUsage||started){const host=document.createElement('div');renderTokenUsage(host,tokenUsage,{showEmpty:true});new Notice(host,8000);}}
   }
   navText(parent,text,path,cls){const a=parent.createEl('button',{text,cls:cls||'lh-text-link'});a.onclick=()=>this.open(path);return a;}
   header(el,kicker,title,subtitle){const h=el.createDiv({cls:'lh-head'});h.createDiv({text:kicker,cls:'lh-eyebrow'});h.createEl('h1',{text:title});if(subtitle)h.createEl('p',{text:subtitle});return h;}
   async renderHome(el){
+    await this.syncLearningTodos();
     el.empty();el.addClass('learning-hub','lh-home');
     const semester=this.currentSemester(),semesterCourses=this.coursesForSemester();
     const all=await Promise.all(semesterCourses.map(c=>this.stats(c)));
     const total=all.reduce((n,s)=>n+s.pending.reviewed,0);
-    const urgent=this.state.tasks.filter(t=>!t.done&&t.due&&t.due<=today()).length;
+    const urgent=this.state.tasks.filter(taskVisible).filter(t=>!t.done&&t.due&&t.due<=today()).length;
     let summary=tr("{0} · {1} 门课程。日程、待办和学习进度都在这里。", [semester?.name||tr("本学期"), semesterCourses.length]);
     if(total||urgent)summary=tr("{0}{1}从今天最重要的事开始。", [urgent?tr("{0} 项待办已到期。", [urgent]):'', total?tr("{0} 个讲次待复习。", [total]):'']);
     this.header(el,tr("PERSONAL SPACE"),tr("学习空间"),this.state.aiSummary?.date===today()?this.state.aiSummary.text:summary);
@@ -1457,7 +1576,7 @@ module.exports=class LearningHub extends Plugin {
     for(const s of visibleSlots)this.homeSlotRow(schedulePanel,s);
     const scheduleFoot=schedulePanel.createDiv({cls:'lh-home-panel-footer'});
     this.navText(scheduleFoot,tr("查看完整日程 →"),SCHEDULE);
-    const plan=scheduleFoot.createEl('button',{text:this.scheduleAnalysis?tr("正在生成日程草案…"):tr("AI 安排 7 天"),cls:'lh-secondary'});plan.disabled=!!this.scheduleAnalysis;plan.onclick=()=>this.generateScheduleDraft(plan);
+    const planning=!!this.scheduleAnalysis||!!this.scheduleDraftAdjustment;const plan=scheduleFoot.createEl('button',{text:this.scheduleDraftAdjustment?tr("正在调整日程…"):this.scheduleAnalysis?tr("正在生成日程草案…"):tr("AI 安排 7 天"),cls:'lh-secondary'});plan.disabled=planning;plan.onclick=()=>this.generateScheduleDraft(plan);
     const due=tasksForToday(this.state.tasks,this.state.slots,today());
     const tasksPanel=panel(priority,tr("今日待办"),tr("{0} 项", [due.length]),'lh-tasks-panel');
     if(!due.length)tasksPanel.createDiv({text:tr("今天没有需要完成的待办。"),cls:'lh-home-empty'});
@@ -1487,18 +1606,18 @@ module.exports=class LearningHub extends Plugin {
     this.navText(foot,tr("查看课程总目录 ↗"),INDEX);
     const companion=secondary.createDiv({cls:'lh-home-companion'});
     const recent=recentDeadlineTasks(this.state.tasks,currentTime,5);
-    const remindersPanel=panel(companion,tr("最近事项"),tr("{0} 项置顶 · 按 DDL 排序", [this.state.tasks.filter(t=>t.pinned).length]),'lh-reminders-panel');
-    if(!recent.length)remindersPanel.createDiv({text:tr("暂无设置 DDL 或置顶的事项。"),cls:'lh-empty'});
+    const remindersPanel=panel(companion,tr("最近事项"),tr('{0} 项紧急 · {1} 项置顶关注',[this.state.tasks.filter(taskVisible).filter(t=>t.urgent&&!completed(t)).length,this.state.tasks.filter(taskVisible).filter(t=>t.pinned).length]),'lh-reminders-panel');
+    if(!recent.length)remindersPanel.createDiv({text:tr("暂无紧急、设置 DDL 或置顶关注的事项。"),cls:'lh-empty'});
     for(const task of recent){
       const item=remindersPanel.createDiv({cls:`lh-deadline-row${task.pinned?' is-pinned':''}${urgencyBand(task,currentTime)===0&&!completed(task)?' is-overdue':''}`});
       const body=item.createDiv({cls:'lh-deadline-body'});
       const title=body.createEl('button',{text:this.itemDisplayTitle(task),cls:'lh-deadline-title'});title.onclick=()=>{if(task.course||task.lessonPath||this.courses.includes(task.source))this.openTaskTarget(task);else this.open(TASKS);};
       body.createSpan({text:deadlineLabel(task,currentTime),cls:'lh-deadline-date'});
+      if(task.urgent)item.createSpan({text:tr('紧急'),cls:'lh-task-urgent-badge'});
       if(task.pinned)item.createSpan({text:completed(task)?tr("已完成 · 置顶"):tr("置顶"),cls:'lh-deadline-pin'});
     }
     const projectsPanel=panel(companion,tr("项目与论文"),null,'lh-projects-panel');
     const projects=projectsPanel.createDiv({cls:'lh-projects'});
-    this.navText(projects,'Projects →','Projects/Projects.md','lh-project');
     this.navText(projects,tr("课外学习 →"),`${ROOT}/Self Study/Self Study.md`,'lh-project');
     projects.createDiv({text:tr("论文阅读：尚未建立统一入口"),cls:'lh-project-muted'});
   }
@@ -1519,6 +1638,32 @@ module.exports=class LearningHub extends Plugin {
       this.draftOpenPaths=this.currentWorkspacePaths();
       window.setTimeout(()=>leaf.view?.editor?.focus?.(),0);
     }catch(error){console.error('Learning Hub draft creation:',error);new Notice(tr("创建草稿失败：{0}", [error.message||error]));}
+  }
+  importDrafts(){
+    const input=document.createElement('input');input.type='file';input.multiple=true;input.accept='.md,text/markdown';
+    input.onchange=()=>{const files=Array.from(input.files||[]);input.value='';if(files.length)void this.importDraftFiles(files);};
+    input.click();
+  }
+  async importDraftFiles(files){
+    const imported=[],failed=[],reserved=new Set();
+    try{await this.ensureFolder(DRAFT_FOLDER);}
+    catch(error){new Notice(tr("Markdown 导入失败：{0}",[error.message||error]),7000);return;}
+    for(const file of files){
+      try{
+        const target=draftImportPath(file.name,path=>reserved.has(path)||Boolean(this.app.vault.getAbstractFileByPath(path)));
+        if(!target)throw new Error(tr("请选择有效的 .md 文件名"));
+        const content=await file.text();
+        await this.app.vault.create(target,content);
+        reserved.add(target);imported.push(target);
+      }catch(error){console.error('Learning Hub draft import:',file.name,error);failed.push(file.name);}
+    }
+    if(imported.length&&this.lastMainLeaf?.view?.page===DRAFTS_PAGE){
+      try{await this.lastMainLeaf.view.render();}
+      catch(error){console.warn('Learning Hub drafts refresh after import:',error);}
+    }
+    if(failed.length&&imported.length)new Notice(tr("已导入 {0} 个 Markdown 草稿，{1} 个文件失败：{2}",[imported.length,failed.length,failed.join('、')]),7000);
+    else if(failed.length)new Notice(tr("Markdown 导入失败：{0}",[failed.join('、')]),7000);
+    else if(imported.length)new Notice(tr("已导入 {0} 个 Markdown 草稿。",[imported.length]));
   }
   async generateDraftTitle(file,manual=false){
     if(!isTimestampDraft(file?.path)){if(manual)new Notice(tr("只为 Draft 文件夹中仍以时间命名的草稿生成标题"));return;}
@@ -1561,7 +1706,9 @@ module.exports=class LearningHub extends Plugin {
     }).sort((a,b)=>b.createdAt.getTime()-a.createdAt.getTime()||a.title.localeCompare(b.title,'zh-CN'));
     const head=this.header(el,tr("DRAFTS / RECENT NOTES"),tr("草稿本"),drafts.length?tr("按创建时间倒序"):tr("Draft 文件夹目前还没有 Markdown 草稿。"));
     head.addClass('lh-drafts-head');
-    const create=head.createEl('button',{text:tr("＋ 新建草稿"),cls:'lh-draft-create',attr:{type:'button','aria-label':tr("新建时间草稿")}});create.addClass('mod-cta');create.onclick=()=>this.createDraft();
+    const actions=head.createDiv({cls:'lh-draft-actions'});
+    const importButton=actions.createEl('button',{text:tr("导入 Markdown"),cls:'lh-draft-import',attr:{type:'button'}});importButton.onclick=()=>this.importDrafts();
+    const create=actions.createEl('button',{text:tr("＋ 新建草稿"),cls:'lh-draft-create',attr:{type:'button','aria-label':tr("新建时间草稿")}});create.addClass('mod-cta');create.onclick=()=>this.createDraft();
     if(!drafts.length){el.createDiv({text:tr("草稿保存到 Draft 文件夹后，会自动出现在这里。"),cls:'lh-drafts-empty'});return;}
     const list=el.createDiv({cls:'lh-draft-list'});
     const columns=list.createDiv({cls:'lh-draft-list-head'});
@@ -1576,10 +1723,12 @@ module.exports=class LearningHub extends Plugin {
     }
   }
   openTaskTarget(t){
-    if(t.assignmentId&&t.course){void this.openHub('assignments',t.course);return;}
+    if(t.materialId&&t.course){void this.openHub('practice',t.course,undefined,null,0,t.materialId);return;}
+    if(t.assignmentId&&t.course){void this.openHomework(t.course,t.assignmentId);return;}
     if(t.lessonPath){const course=t.course||this.courses.find(c=>t.lessonPath.startsWith(`${ROOT}/${c}/`));if(course){void this.showWorkflow(t.kind==='preview'?'preview':t.kind==='review'?'review':'recall',course,t.lessonPath,t.round||1);return;}}
     if(t.course){void this.open(`${ROOT}/${t.course}/学习概览.md`);return;}
-    if(t.source&&this.courses.includes(t.source))void this.open(`${ROOT}/${t.source}/学习概览.md`);
+    if(t.source&&this.courses.includes(t.source)){void this.open(`${ROOT}/${t.source}/学习概览.md`);return;}
+    this.addTask(t);
   }
   itemDisplayTitle(item){
     const linked=item.taskId?this.state.tasks.find(task=>task.id===item.taskId):this.state.tasks.find(task=>task.id===item.id);
@@ -1590,21 +1739,23 @@ module.exports=class LearningHub extends Plugin {
     return title;
   }
   recordOutcome(item,kind){
-    const estimated=Number(item.minutes)||Math.max(15,Math.round((new Date(item.end)-new Date(item.start))/60000));
+    if(item.learningManaged&&item.lessonPath){this.openTaskTarget(item);return;}
+    const estimated=Number(item.estimatedMinutes)||Number(item.minutes)||Math.max(15,Math.round((new Date(item.end)-new Date(item.start))/60000));
     new OutcomeModal(this.app,this.itemDisplayTitle(item),estimated,async result=>{
       const outcome={...result,title:item.title,kind:item.kind||kind,estimatedMinutes:estimated,id:item.id,start:item.start||'',end:item.end||''};
       if(kind==='calendar'){this.state.eventOutcomes[item.id]=outcome;if(result.status!=='unfinished')this.state.googleCalendar.pendingEvents=this.state.googleCalendar.pendingEvents.filter(event=>event.id!==item.id);}
-      else Object.assign(item,result,{done:result.status!=='unfinished'});
+      else if(kind==='task'&&isLongTerm(item)){item.lastPracticedAt=result.status==='unfinished'?'':result.completedAt;outcome.kind='long-term-session';outcome.projectId=item.id;outcome.taskId=item.id;outcome.id=crypto.randomUUID();if(result.status!=='unfinished')for(const slot of this.state.slots)if(slot.taskId===item.id&&slot.start.slice(0,10)===result.completedAt.slice(0,10)&&taskStatus(slot)==='unfinished')Object.assign(slot,result,{done:true});}
+      else{Object.assign(item,result,{done:result.status!=='unfinished'});const project=item.taskId&&this.state.tasks.find(task=>task.id===item.taskId&&isLongTerm(task));if(project){outcome.kind='long-term-session';outcome.projectId=project.id;outcome.taskId=project.id;}}
       this.state.completionHistory=this.state.completionHistory.filter(row=>!(row.id===item.id&&row.kind===outcome.kind));
       if(result.status!=='unfinished')this.state.completionHistory.push(outcome);
       for(const task of this.state.tasks)if(taskStatus(task)==='unfinished')task.minutes=estimateMinutes(task,this.state.completionHistory);
       await this.save();
       if(kind==='task'||kind==='slot')await this.updateRollingSchedule();
-    },taskStatus(kind==='calendar'?this.state.eventOutcomes[item.id]:item)!=='unfinished'?taskStatus(kind==='calendar'?this.state.eventOutcomes[item.id]:item):(item.due&&item.due<today()||item.end&&item.end<localNow()?'late':'on-time')).open();
+    },kind==='task'&&isLongTerm(item)?'on-time':taskStatus(kind==='calendar'?this.state.eventOutcomes[item.id]:item)!=='unfinished'?taskStatus(kind==='calendar'?this.state.eventOutcomes[item.id]:item):(item.due&&item.due<today()||item.end&&item.end<localNow()?'late':'on-time')).open();
   }
   homeSlotRow(host,s){
     const display=scheduleItemState(s,{choices:this.state.calendarChoices,outcomes:this.state.eventOutcomes,tasks:this.state.tasks,now:localNow()});
-    const system=s.source==='system-schedule';
+    const system=s.source==='system-schedule'||s.source==='profile-setting'||(s.source==='fixed-setting'&&s.title?.startsWith('睡眠'));
     const row=host.createDiv({cls:`lh-home-slot${display.overdue?' is-overdue':''}${display.course?' is-course':''}${system?' is-system':''}`});
     const stamp=row.createDiv({cls:'lh-home-slot-stamp'});
     const day=s.start.slice(0,10);
@@ -1619,7 +1770,7 @@ module.exports=class LearningHub extends Plugin {
     if(!display.course&&!system){
       const status=display.status;
       const button=row.createEl('button',{text:display.overdue?tr("逾期未完成"):status==='on-time'?tr("按时完成"):status==='late'?tr("未按时完成"):tr("未完成"),cls:`lh-home-slot-status is-${status}`,attr:{type:'button','aria-label':tr("更新「{0}」的完成状态", [this.itemDisplayTitle(s)])}});
-      button.onclick=()=>{const task=!calendar&&s.taskId?this.state.tasks.find(item=>item.id===s.taskId):null;this.recordOutcome(task||s,task?'task':calendar?'calendar':'slot');};
+      button.onclick=()=>{const task=!calendar&&s.taskId?this.state.tasks.find(item=>item.id===s.taskId):null;this.recordOutcome(task&&!isLongTerm(task)?task:s,task&&!isLongTerm(task)?'task':calendar?'calendar':'slot');};
     }
   }
   homeTaskRow(host,t){
@@ -1629,8 +1780,10 @@ module.exports=class LearningHub extends Plugin {
     const target=!!(t.course||t.lessonPath||this.courses.includes(t.source));
     if(target){const title=body.createEl('button',{text:this.itemDisplayTitle(t),cls:'lh-home-task-title'});title.onclick=()=>this.openTaskTarget(t);}
     else body.createEl('strong',{text:this.itemDisplayTitle(t),cls:'lh-home-task-title'});
-    body.createSpan({text:[t.due?`${tr("截止")} ${t.due}${t.dueTime?` ${t.dueTime}`:''}`:tr("无 DDL"),tr("预计 {0} 分钟", [t.minutes||estimateMinutes(t,this.state.completionHistory)])].join(' · '),cls:'lh-home-task-meta'});
-    const done=row.createEl('button',{text:status==='on-time'?tr("按时完成"):status==='late'?tr("未按时完成"):tr("未完成"),cls:'lh-home-task-done',attr:{'aria-label':tr("记录「{0}」的完成情况", [this.itemDisplayTitle(t)])}});
+    if(t.learningManaged)body.createSpan({text:t.learningLocked?tr('学习流程 · 待解锁'):tr('学习流程 · 自动加入'),cls:'lh-task-learning-badge'});
+    if(t.urgent)body.createSpan({text:tr('紧急'),cls:'lh-task-urgent-badge'});
+    body.createSpan({text:[t.due?`${tr("截止")} ${t.due}${t.dueTime?` ${t.dueTime}`:''}`:tr("无 DDL"),taskDurationLabel(t)].join(' · '),cls:'lh-home-task-meta'});
+    const done=row.createEl('button',{text:isLongTerm(t)&&status==='unfinished'?tr('记录本次完成'):status==='on-time'?tr("按时完成"):status==='late'?tr("未按时完成"):tr("未完成"),cls:'lh-home-task-done',attr:{'aria-label':tr("记录「{0}」的完成情况", [this.itemDisplayTitle(t)])}});
     done.onclick=()=>this.recordOutcome(t,'task');
   }
   taskRow(host,t){
@@ -1639,15 +1792,20 @@ module.exports=class LearningHub extends Plugin {
     const title=body.createEl('button',{text:this.itemDisplayTitle(t),cls:'lh-task-title'});title.onclick=()=>this.openTaskTarget(t);
     if(!t.course&&!t.lessonPath&&!this.courses.includes(t.source))title.disabled=true;
     if(t.description)body.createDiv({text:t.description,cls:'lh-task-description'});
-    body.createSpan({text:[t.due?`${tr("截止")} ${t.due}${t.dueTime?` ${t.dueTime}`:''}`:tr("无 DDL"),tr("预计 {0} 分钟", [t.minutes||estimateMinutes(t,this.state.completionHistory)]),t.course?.split(' - ')[0]||(['作业','间隔复习','DeepSeek 对话'].includes(t.source)?tr(t.source):t.source)||tr("个人")].join(' · '),cls:'lh-task-meta'});
+    if(t.learningManaged)body.createSpan({text:t.learningLocked?tr('学习流程 · 待解锁'):tr('学习流程 · 自动加入'),cls:'lh-task-learning-badge'});
+    if(t.urgent)body.createSpan({text:tr('紧急'),cls:'lh-task-urgent-badge'});
+    body.createSpan({text:[t.due?`${tr("截止")} ${t.due}${t.dueTime?` ${t.dueTime}`:''}`:tr("无 DDL"),taskDurationLabel(t),t.course?.split(' - ')[0]||(['作业','间隔复习','DeepSeek 对话'].includes(t.source)?tr(t.source):t.source)||tr("个人")].join(' · '),cls:'lh-task-meta'});
     const actions=row.createDiv({cls:'lh-task-actions'});actions.createSpan({text:taskStatus(t)==='on-time'?tr("按时完成"):taskStatus(t)==='late'?tr("未按时完成"):tr("未完成"),cls:'lh-status-label'});
-    const status=actions.createEl('button',{text:tr("记录状态")});status.onclick=()=>this.recordOutcome(t,'task');
+    const status=actions.createEl('button',{text:t.learningManaged&&t.lessonPath?tr('进入学习'):isLongTerm(t)?tr('记录本次完成'):tr("记录状态")});status.onclick=()=>this.recordOutcome(t,'task');
+    const urgent=actions.createEl('button',{text:t.urgent?tr('取消紧急'):tr('标为紧急'),cls:`lh-task-urgent${t.urgent?' is-urgent':''}`,attr:{type:'button','aria-pressed':String(!!t.urgent),title:tr('紧急任务优先安排')}});urgent.onclick=async()=>{t.urgent=!t.urgent;await this.save();};
     const pin=actions.createEl('button',{text:t.pinned?tr("取消置顶"):tr("置顶此项"),cls:`lh-task-pin${t.pinned?' is-pinned':''}`,attr:{type:'button','aria-pressed':String(!!t.pinned),'aria-label':`${t.pinned?tr("取消置顶"):tr("置顶")}「${t.title}」`}});pin.onclick=async()=>{t.pinned=!t.pinned;await this.save();};
+    if(isLongTerm(t)&&taskStatus(t)==='unfinished'){const stop=actions.createEl('button',{text:tr('结束项目')});stop.onclick=()=>new ConfirmModal(this.app,tr('结束长期项目？'),tr('结束后不再安排新的投入时间，已有完成记录会保留。'),tr('确认结束'),async()=>{t.status='on-time';t.done=true;t.completedAt=now();this.state.slots=this.state.slots.filter(slot=>slot.taskId!==t.id||slot.start<localNow()||taskStatus(slot)!=='unfinished');await this.save();}).open();}
+    const aiEdit=actions.createEl('button',{text:tr("AI 修改"),cls:'lh-task-ai-edit'});aiEdit.onclick=()=>new TaskIntakeModal(this,t).open();
     const edit=actions.createEl('button',{text:tr("编辑")});edit.onclick=()=>this.addTask(t);
   }
   slotRow(host,s){
     const display=scheduleItemState(s,{choices:this.state.calendarChoices,outcomes:this.state.eventOutcomes,tasks:this.state.tasks,now:localNow()});
-    const system=s.source==='system-schedule';
+    const system=s.source==='system-schedule'||s.source==='profile-setting'||(s.source==='fixed-setting'&&s.title?.startsWith('睡眠'));
     const row=host.createDiv({cls:`lh-slot${display.overdue?' is-overdue':''}${display.course?' is-course':''}${system?' is-system':''}`});const end=s.start.slice(0,10)===s.end.slice(0,10)?s.end.slice(11,16):s.end.slice(5,16).replace('T',' ');
     row.createEl('time',{text:s.allDay?tr("{0} 全天", [s.start.slice(5,10)]):`${s.start.slice(5,16).replace('T',' ')}–${end}`});
     const body=row.createDiv({cls:'lh-slot-body'});
@@ -1661,11 +1819,12 @@ module.exports=class LearningHub extends Plugin {
     }
     if(!display.course&&!system){
       const button=actions.createEl('button',{text:display.overdue?tr("逾期未完成"):display.status==='on-time'?tr("按时完成"):display.status==='late'?tr("未按时完成"):tr("未完成"),cls:'lh-slot-status'});
-      button.onclick=()=>{const task=!calendar&&s.taskId?this.state.tasks.find(item=>item.id===s.taskId):null;this.recordOutcome(task||s,task?'task':calendar?'calendar':'slot');};
+      button.onclick=()=>{const task=!calendar&&s.taskId?this.state.tasks.find(item=>item.id===s.taskId):null;this.recordOutcome(task&&!isLongTerm(task)?task:s,task&&!isLongTerm(task)?'task':calendar?'calendar':'slot');};
     }
     if(s.taskId)title.onclick=()=>this.openSlotTarget(s);
   }
   openSlotTarget(s){
+    if(['preview','review','recall'].includes(s.kind)&&s.course){this.openTaskTarget(s);return true;}
     if(s.taskId?.startsWith('preview:')){this.openTaskTarget({title:s.title,lessonPath:s.lessonPath||'',course:s.course||'',kind:'preview'});return true;}
     if(s.taskId?.startsWith('review:')){const rest=s.taskId.slice(7),split=rest.lastIndexOf(':'),lessonPath=rest.slice(0,split),round=Number(rest.slice(split+1));this.openTaskTarget({title:s.title,lessonPath,kind:'review',round});return true;}
     if(s.taskId){const task=this.state.tasks.find(item=>item.id===s.taskId);if(task){this.openTaskTarget(task);return true;}}
@@ -1677,31 +1836,39 @@ module.exports=class LearningHub extends Plugin {
     new EntryModal(this.app,existing?tr("编辑待办"):tr("添加待办"),[
       {key:'title',label:tr("需要完成的事项"),value:existing?.title||''},
       {key:'description',label:tr("详细说明（可选）"),multiline:true,value:existing?.description||''},
+      {key:'taskType',label:tr('持续方式'),options:[{label:tr('单次任务'),value:'one-time'},{label:tr('长期项目（无预计结束时间）'),value:'long-term'}],value:existing?.taskType||'one-time',disabled:!!existing?.learningManaged,help:existing?.learningManaged?tr('阶段、日期和课程由学习进度自动维护。'):'',onChange:(inputs,rows)=>{const ongoing=inputs.taskType.value==='long-term';for(const key of ['due','dueTime']){inputs[key].disabled=ongoing||!!existing?.learningManaged;rows[key].classList.toggle('is-disabled',ongoing||!!existing?.learningManaged);if(ongoing)inputs[key].value='';}rows.estimatedMinutes.querySelector('label').setText(ongoing?tr('每次投入用时（可选）'):tr('预计用时（可选）'));}},
+      {key:'estimatedMinutes',label:tr('预计用时（可选）'),type:'number',attrs:{min:'1',step:'any'},placeholder:tr('留空由 AI 估计'),value:existing?.estimatedMinutes?existing.estimatedMinutes/(existing.durationUnit==='hours'?60:1):''},
+      {key:'durationUnit',label:tr('用时单位'),options:[{label:tr('分钟'),value:'minutes'},{label:tr('小时'),value:'hours'}],value:existing?.durationUnit||'minutes'},
+      {key:'urgent',label:tr('紧急 · 优先安排'),type:'checkbox',value:!!existing?.urgent},
+      {key:'pinned',label:tr('置顶关注 · 不影响排程优先级'),type:'checkbox',value:!!existing?.pinned},
       {key:'due',label:tr("DDL（可选）"),type:'date',value:existing?.due||''},
       {key:'dueTime',label:tr("DDL 时间（可选）"),type:'time',value:existing?.dueTime||''},
-      {key:'course',label:tr("关联课程（可选）"),options:courses,value:existing?.course||''},
-      {key:'lessonPath',label:tr("关联讲次（可选）"),options:lessons,value:existing?.lessonPath||''}
+      {key:'course',label:tr("关联课程（可选）"),options:courses,value:existing?.course||'',disabled:!!existing?.learningManaged},
+      {key:'lessonPath',label:tr("关联讲次（可选）"),options:lessons,value:existing?.lessonPath||'',disabled:!!existing?.learningManaged}
     ],values=>this.saveTask(values,existing),existing?()=>this.deleteTask(existing):null).open();
   }
   async saveTask(values,existing=null){
+    if(existing?.learningManaged)values={...values,taskType:'one-time',due:existing.due||'',dueTime:existing.dueTime||'',course:existing.course||'',lessonPath:existing.lessonPath||''};
     const title=String(values.title||'').trim();if(!title){new Notice(tr("请填写事项名称"));return false;}
-    const due=String(values.due||'').trim(),dueTime=String(values.dueTime||'').trim();
+    let options;try{options=normalizeTaskOptions(values,existing||{});}catch(error){new Notice(error.message);return false;}
+    const due=isLongTerm(options)?'':String(values.due||'').trim(),dueTime=isLongTerm(options)?'':String(values.dueTime||'').trim();
     if(dueTime&&!due){new Notice(tr("填写 DDL 时间前，请先选择日期"));return false;}
     let course=this.courses.includes(values.course)?values.course:'';
     const lessonPath=String(values.lessonPath||'').trim();
     if(lessonPath){const linked=this.courses.find(item=>lessonPath.startsWith(`${ROOT}/${item}/`));if(linked)course=linked;}
-    const task={title,description:String(values.description||'').trim(),due,dueTime:due?dueTime:'',course,lessonPath,minutes:estimateMinutes({...values,title,kind:'task'},this.state.completionHistory),source:course||values.source||existing?.source||'手动录入',pinned:values.pinned===undefined?!!existing?.pinned:!!values.pinned};
+    const task={title,description:String(values.description||'').trim(),due,dueTime:due?dueTime:'',course,lessonPath,...options,minutes:estimateMinutes({...values,...options,title,kind:'task'},this.state.completionHistory),source:course||values.source||existing?.source||'手动录入'};
     if(existing)Object.assign(existing,task);else this.state.tasks.push({...task,id:crypto.randomUUID(),status:'unfinished',done:false,createdAt:now()});
     await this.save();await this.updateRollingSchedule();
     return true;
   }
   async deleteTask(existing){
     const task=this.state.tasks.find(item=>item.id===existing.id);if(!task)return;
-    const previousTasks=this.state.tasks,previousSlots=this.state.slots;
+    const previousTasks=this.state.tasks,previousSlots=this.state.slots,previousDismissed=this.state.dismissedLearningTodoIds;
+    if(task.learningManaged)this.state.dismissedLearningTodoIds=[...new Set([...(previousDismissed||[]),task.id])];
     this.state.tasks=previousTasks.filter(item=>item.id!==task.id);
     this.state.slots=previousSlots.filter(slot=>slot.taskId!==task.id);
     try{await this.save();}
-    catch(error){this.state.tasks=previousTasks;this.state.slots=previousSlots;throw error;}
+    catch(error){this.state.tasks=previousTasks;this.state.slots=previousSlots;this.state.dismissedLearningTodoIds=previousDismissed;throw error;}
     try{await this.updateRollingSchedule();}
     catch(error){console.warn('Learning Hub task deletion schedule refresh:',error);new Notice(tr('待办已删除，但日程更新失败，可稍后手动更新。'));}
     for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(['tasks','schedule'].includes(leaf.view?.page))await leaf.view.render();
@@ -1713,14 +1880,15 @@ module.exports=class LearningHub extends Plugin {
     const knownLessons=new Set(knownCourses.flatMap(course=>this.lessons(course).map(file=>file.path)));
     const tasks=[];
     for(const [index,values] of valuesList.entries()){
-      const title=String(values.title||'').trim(),due=String(values.due||'').trim(),dueTime=String(values.dueTime||'').trim();
+      let options;try{options=normalizeTaskOptions(values);}catch(error){new Notice(error.message);return false;}
+      const title=String(values.title||'').trim(),due=isLongTerm(options)?'':String(values.due||'').trim(),dueTime=isLongTerm(options)?'':String(values.dueTime||'').trim();
       if(!title){new Notice(tr("请填写第 {0} 项的名称", [index+1]));return false;}
       if(due&&!validDate(due)){new Notice(tr("第 {0} 项的 DDL 日期无效", [index+1]));return false;}
       if(dueTime&&(!due||!/^([01]\d|2[0-3]):[0-5]\d$/.test(dueTime))){new Notice(tr("第 {0} 项的 DDL 时间无效", [index+1]));return false;}
       const lessonPath=knownLessons.has(values.lessonPath)?values.lessonPath:'';
       let course=knownCourses.includes(values.course)?values.course:'';
       if(lessonPath){const linked=knownCourses.find(item=>lessonPath.startsWith(`${ROOT}/${item}/`));if(linked)course=linked;}
-      const task={title,description:String(values.description||'').trim(),due,dueTime,course,lessonPath,minutes:estimateMinutes({...values,title,kind:'task'},this.state.completionHistory),source:course||'DeepSeek 对话',pinned:!!values.pinned};
+      const task={title,description:String(values.description||'').trim(),due,dueTime,course,lessonPath,...options,minutes:estimateMinutes({...values,...options,title,kind:'task'},this.state.completionHistory),source:course||'DeepSeek 对话'};
       tasks.push({...task,id:crypto.randomUUID(),status:'unfinished',done:false,createdAt:now()});
     }
     this.state.tasks.push(...tasks);
@@ -1730,7 +1898,7 @@ module.exports=class LearningHub extends Plugin {
     return true;
   }
   addReminder(){new EntryModal(this.app,tr("添加提醒"),[{key:'title',label:tr("事项")},{key:'at',label:tr("时间"),type:'datetime-local'},{key:'source',label:tr("来源"),placeholder:tr("邮件标题 / 课程通知 / 手动")}],async v=>{this.state.reminders.push({...v,id:crypto.randomUUID(),done:false});await this.save();}).open();}
-  addSlot(){new EntryModal(this.app,tr("安排时间段"),[{key:'title',label:tr("要做什么")},{key:'start',label:tr("开始"),type:'datetime-local'},{key:'end',label:tr("结束"),type:'datetime-local'}],async v=>{if(!v.start||!v.end||v.end<=v.start||v.start.slice(0,10)!==v.end.slice(0,10)){new Notice(tr("请选择同一天内有效的开始和结束时间"));return;}const date=v.start.slice(0,10),weekday=new Date(`${date}T12:00`).getDay();const rest=expandRestBlocks(this.state.ai.restBlocks||[],[date]).find(block=>v.start<block.end&&block.start<v.end);if(rest){new Notice(tr("该时段已标记为休息，不能安排内容"));return;}const weekly=(this.state.ai.fixedBlocks||[]).filter(row=>Number(row.day)===weekday).map(row=>({title:row.title,start:`${date}T${row.start}`,end:`${date}T${row.end}`}));const conflicts=[...this.allScheduleSlots({busyOnly:true}),...weekly].filter(s=>v.start<s.end&&s.start<v.end);if(conflicts.length){new Notice(tr("与「{0}」冲突，请换一个时间。", [conflicts[0].title]));return;}this.state.slots.push({...v,id:crypto.randomUUID(),fixed:false,source:'manual',status:'unfinished'});await this.save();await this.updateRollingSchedule();}).open();}
+  addSlot(){new EntryModal(this.app,tr("安排时间段"),[{key:'title',label:tr("要做什么")},{key:'start',label:tr("开始"),type:'datetime-local'},{key:'end',label:tr("结束"),type:'datetime-local'}],async v=>{if(!v.start||!v.end||v.end<=v.start||v.start.slice(0,10)!==v.end.slice(0,10)){new Notice(tr("请选择同一天内有效的开始和结束时间"));return;}const date=v.start.slice(0,10),weekday=new Date(`${date}T12:00`).getDay();const rest=expandRestBlocks(this.state.ai.restBlocks||[],[date]).find(block=>v.start<block.end&&block.start<v.end);if(rest){new Notice(tr("该时段已标记为休息，不能安排内容"));return;}const request=await this.scheduleInputs(date,1,{adjust:true});if(this.state.ai.scheduleProfile&&!request.availability.some(window=>v.start>=window.start&&v.end<=window.end)){new Notice(tr('该时间不在规划的学习窗口内，请先通过时间规则设置。'));return;}const weekly=request.fixedBlocks;const conflicts=[...this.allScheduleSlots({busyOnly:true}),...weekly].filter(s=>v.start<s.end&&s.start<v.end);if(conflicts.length){new Notice(tr("与「{0}」冲突，请换一个时间。", [conflicts[0].title]));return;}this.state.slots.push({...v,id:crypto.randomUUID(),fixed:false,source:'manual',status:'unfinished'});await this.save();await this.updateRollingSchedule();}).open();}
   async markStage(file,key,completedAt=now()){
     const flow=await this.readFlow(file);
     if(key==='previewed')flow.milestones.previewedAt=flow.milestones.previewedAt||completedAt;
@@ -1747,40 +1915,54 @@ module.exports=class LearningHub extends Plugin {
     new ConfirmModal(this.app,tr("确认课堂学习"),tr("确认你已经在唯一主笔记中完成本讲学习与课堂补充。复习日期将按实际完成日期计算。"),tr("确认完成"),async({date})=>{await this.markStage(file,'learned',new Date(`${date}T12:00:00`).toISOString());new Notice(tr("已安排第 1 / 7 / 21 天复习"));},{askDate:true}).open();
   }
   renderSchedule(el){
-    el.empty();el.addClass('learning-hub','lh-schedule');
-    this.header(el,tr("SCHEDULE"),tr("完整日程"),tr("显示接下来 7 天的日程；逾期未完成事项单独保留。Tut / Lab 默认不参加，可在下方选择。"));
-    const top=el.createDiv({cls:'lh-schedule-actions'});
-    const generate=top.createEl('button',{text:this.scheduleAnalysis?tr("正在生成日程草案…"):tr("AI 生成 7 天草案"),cls:'lh-primary'});generate.disabled=!!this.scheduleAnalysis;generate.onclick=()=>this.generateScheduleDraft(generate);
-    const availability=top.createEl('button',{text:tr("设置可学习时间与休息安排"),cls:'lh-secondary'});availability.onclick=()=>new StudyAvailabilityModal(this).open();
-    const refresh=top.createEl('button',{text:tr("更新滚动日程"),cls:'lh-secondary'});refresh.onclick=async()=>{refresh.disabled=true;try{const result=await this.updateRollingSchedule();new Notice(result.added?tr("已新增 {0} 个学习时段。", [result.added]):tr("现有安排已是最新。"));}catch(error){new Notice(tr("更新失败：{0}", [error.message]));}finally{refresh.disabled=false;}};
-    const add=top.createEl('button',{text:tr("＋ 安排时间段"),cls:'lh-secondary'});add.onclick=()=>this.addSlot();
-    if(this.state.googleCalendar.tokens){const sync=top.createEl('button',{text:tr("同步 Google Calendar"),cls:'lh-secondary'});sync.onclick=async()=>{sync.disabled=true;try{await this.syncGoogleCalendar();}catch(_){}finally{sync.disabled=false;}};}
-    this.navText(top,tr("返回主页"),HOME);
+    el.empty();el.addClass('learning-hub','lh-schedule','lh-schedule-dual');
+    const dates=Array.from({length:7},(_,i)=>addDays(today(),i)),currentTime=localNow(),mode=this.state.scheduleViewMode==='calendar'?'calendar':'tasks',focus=dates.includes(this.scheduleFocusedDay)?this.scheduleFocusedDay:dates[0],span=3;
+    const all=completeCalendarItems({settings:this.state.ai,slots:this.state.slots,events:[...(this.state.googleCalendar?.events||[]),...(this.state.googleCalendar?.pendingEvents||[])],dates}),projects=all.filter(isProjectItem);
+    const masthead=el.createDiv({cls:'lh-head lh-schedule-masthead'}),title=masthead.createDiv();title.createDiv({text:tr('SCHEDULE'),cls:'lh-eyebrow'});title.createEl('h1',{text:tr('完整日程')});title.createEl('p',{text:mode==='calendar'?tr('课程、学习与生活作息，按时间查看。'):tr('未来七天的预习、复习、作业与项目安排。')});
+    const meta=masthead.createDiv({cls:'lh-schedule-masthead-meta'});meta.createSpan({text:`${dates[0].replaceAll('-','.')} — ${dates.at(-1).slice(5).replace('-','.')}`});meta.createSpan({text:tr(mode==='calendar'?'{0} 项日程 · {1} 天已确认':'{0} 项学习安排 · {1} 天已确认',[(mode==='calendar'?all:projects).length,dates.filter(date=>(this.state.ai.confirmedDates||[]).includes(date)).length])});
+    const top=el.createDiv({cls:'lh-schedule-actions lh-schedule-toolbar'}),primary=top.createDiv({cls:'lh-schedule-toolbar-primary'}),secondary=top.createDiv({cls:'lh-schedule-toolbar-secondary'});
+    const action=(host,text,icon,cls,handler,description='')=>{const button=host.createEl('button',{cls,attr:{type:'button','aria-label':description||text,title:description||text}});setIcon(button.createSpan({cls:'lh-schedule-button-icon'}),icon);button.createSpan({text});button.onclick=handler;return button;};
+    const planning=!!this.scheduleAnalysis||!!this.scheduleDraftAdjustment,generate=action(primary,this.scheduleDraftAdjustment?tr('正在调整日程…'):this.scheduleAnalysis?tr('正在生成日程草案…'):tr('AI 安排七天'),'sparkles','lh-primary',()=>this.generateScheduleDraft(generate));generate.disabled=planning;
+    const adjust=action(primary,tr('AI 调整日程'),'messages-square','lh-secondary',()=>this.openScheduleAdjustment(),tr('与 AI 交流调整日程'));adjust.disabled=planning;
+    action(secondary,tr('时间规则'),'sliders-horizontal','lh-secondary lh-schedule-quiet',()=>this.openAvailabilitySettings());action(secondary,tr('添加日程'),'plus','lh-secondary lh-schedule-quiet',()=>this.addSlot());if(this.state.googleCalendar.tokens){const sync=action(secondary,tr('同步日历'),'refresh-cw','lh-secondary lh-schedule-quiet',async()=>{sync.disabled=true;try{await this.syncGoogleCalendar();}catch(_){}finally{sync.disabled=false;}});}
+    const viewbar=el.createDiv({cls:'lh-schedule-viewbar'}),views=viewbar.createDiv({cls:'lh-schedule-view-switch',attr:{role:'group','aria-label':tr('日程展示形式')}});
+    for(const [value,label,icon] of [['tasks','任务总览','columns-3'],['calendar','三日日历','calendar-days']]){const button=action(views,tr(label),icon,value===mode?'is-active':'',()=>this.setSchedulePresentation({scheduleViewMode:value}));button.setAttribute('aria-pressed',String(value===mode));}
+    const calendar=this.state.googleCalendar;if(calendar.tokens){const status=calendar.error?tr('日历同步失败，使用缓存'):calendar.syncedAt?tr('日历已同步'):tr('正在等待日历同步'),notice=viewbar.createDiv({cls:'lh-schedule-sync-compact',attr:{title:calendar.error||calendar.syncedAt||status}});setIcon(notice.createSpan(),calendar.error?'circle-alert':'check');notice.createSpan({text:status});}
+    primary.insertBefore(views,primary.firstChild);const syncNotice=viewbar.querySelector('.lh-schedule-sync-compact');if(syncNotice)secondary.append(syncNotice);viewbar.remove();
     if(this.scheduleAnalysis)this.renderScheduleProgress(el,this.scheduleAnalysis);
-    const calendar=this.state.googleCalendar;
-    if(calendar.tokens)el.createDiv({text:calendar.error?tr("Google Calendar 上次同步失败：{0}；已显示缓存日程。", [calendar.error]):calendar.syncedAt?tr("Google Calendar · {0} 项 · 更新于 {1}", [calendar.events.length, new Date(calendar.syncedAt).toLocaleString(uiLocale())]):tr("Google Calendar 正在等待首次同步"),cls:'lh-calendar-status'});
-    if(this.state.unscheduledTasks?.length)el.createDiv({text:tr("有 {0} 项任务尚未找到满足截止时间的空档，请检查可用时间或 DDL。", [this.state.unscheduledTasks.length]),cls:'lh-draft-conflict'});
-    if(this.state.scheduleDraft)this.renderScheduleDraft(el);
-    const endDay=addDays(today(),7);
-    const currentTime=localNow();
-    const all=this.allScheduleSlots().filter(s=>s.start>=`${today()}T00:00`&&s.start<`${endDay}T00:00`&&!scheduleItemState(s,{choices:this.state.calendarChoices,outcomes:this.state.eventOutcomes,tasks:this.state.tasks,now:currentTime}).hidden).sort((a,b)=>a.start.localeCompare(b.start));
-    el.createDiv({text:tr("{0} — {1} · 共 {2} 项", [today(), addDays(endDay,-1), all.length]),cls:'lh-schedule-range'});
-    const overdue=this.overdueScheduleSlots();
-    if(overdue.length){const panel=el.createDiv({cls:'lh-panel lh-overdue-panel'});const head=panel.createDiv({cls:'lh-section-title'});head.createEl('h2',{text:tr("逾期未完成")});head.createSpan({text:tr("{0} 项 · 完成后自动移出", [overdue.length])});for(const item of overdue)this.slotRow(panel,item);}
-    const agenda=el.createDiv({cls:'lh-panel lh-agenda'});
-    if(!all.length)agenda.createDiv({text:tr("这 7 天没有已确定的日程。"),cls:'lh-empty'});
-    const showGap=(from,to)=>{if(from>to)return;agenda.createDiv({text:from===to?tr("{0} · 暂无已确定日程", [from]):tr("{0} — {1} · 暂无已确定日程", [from, to]),cls:'lh-agenda-gap'});};
-    let last=addDays(today(),-1),group;for(const s of all){const day=s.start.slice(0,10);if(day!==last){showGap(addDays(last,1),addDays(day,-1));group=agenda.createDiv({cls:'lh-agenda-day'});group.createEl('h2',{text:day,cls:'lh-day'});last=day;}this.slotRow(group,s);}
-    if(all.length)showGap(addDays(last,1),addDays(endDay,-1));
+    try{const rules=buildScheduleRequest({settings:{...this.state.ai,confirmedDates:[]},slots:this.allScheduleSlots({busyOnly:true}),startDate:today(),days:7}),issues=this.state.slots.filter(slot=>['ai','ai-schedule','manual'].includes(slot.source)&&slot.start>=rules.currentLocal&&rules.dates.includes(slot.start.slice(0,10))).filter(slot=>rules.fixedBlocks.some(block=>slot.start<block.end&&block.start<slot.end)||rules.restBlocks.some(block=>slot.start<block.end&&block.start<slot.end)||(slot.source!=='manual'&&!rules.availability.some(window=>slot.start>=window.start&&slot.end<=window.end))||rules.busySlots.some(block=>block.id!==slot.id&&slot.start<block.end&&block.start<slot.end));if(issues.length)el.createDiv({text:tr('有 {0} 项已安排内容与当前规则或课程冲突，请通过 AI 对话调整：{1}',[issues.length,issues.slice(0,3).map(item=>item.title).join('、')]),cls:'lh-draft-conflict'});}catch(error){el.createDiv({text:error.message,cls:'lh-flow-muted'});}
+    if(this.state.unscheduledTasks?.length)el.createDiv({text:tr('有 {0} 项任务尚未找到满足截止时间的空档，请检查可用时间或 DDL。',[this.state.unscheduledTasks.length]),cls:'lh-draft-conflict'});if(this.state.scheduleDraft)this.renderScheduleDraft(el);
+    const overdue=this.overdueScheduleSlots().filter(isProjectItem);if(overdue.length){const panel=el.createEl('details',{cls:'lh-panel lh-overdue-panel lh-schedule-overdue'});panel.open=this.scheduleOverdueOpen===true;panel.ontoggle=()=>{this.scheduleOverdueOpen=panel.open;};const head=panel.createEl('summary');setIcon(head.createSpan({cls:'lh-schedule-overdue-icon'}),'circle-alert');head.createEl('strong',{text:tr('逾期未完成')});head.createSpan({text:String(overdue.length),cls:'lh-schedule-overdue-count'});head.createSpan({text:tr('完成后自动移出'),cls:'lh-schedule-overdue-note'});setIcon(head.createSpan({cls:'lh-schedule-overdue-chevron'}),'chevron-down');for(const item of overdue)this.slotRow(panel,item);}
+    if(mode==='calendar')renderScheduleCalendar(this,el,all,dates,{today:today(),currentTime,span,focusDate:focus,scrollPosition:this.scheduleCalendarScroll,onFocus:date=>{this.scheduleFocusedDay=date;this.refreshScheduleViews();},onSpan:value=>this.setSchedulePresentation({scheduleCalendarSpan:value}),onOpen:item=>this.openScheduleItem(item)});
+    else this.renderScheduleTasks(el,projects,all,dates);
+  }
+  async setSchedulePresentation(values){
+    const previous={scheduleViewMode:this.state.scheduleViewMode,scheduleCalendarSpan:this.state.scheduleCalendarSpan};if(values.scheduleViewMode&&['tasks','calendar'].includes(values.scheduleViewMode))this.state.scheduleViewMode=values.scheduleViewMode;this.state.scheduleCalendarSpan=3;
+    try{await this.saveData(this.state);}catch(error){Object.assign(this.state,previous);new Notice(tr('保存失败：{0}',[error.message]));return;}await this.refreshScheduleViews();
+  }
+  renderScheduleTasks(el,projects,all,dates){
+    const scroller=el.createDiv({cls:'lh-project-scroll'}),board=scroller.createDiv({cls:'lh-project-board'});
+    for(const [i,date] of dates.entries()){
+      const daily=projects.filter(item=>item.start.slice(0,10)===date),context=all.filter(item=>item.start.slice(0,10)===date),rest=context.some(item=>item.restRule&&item.allDay),confirmed=(this.state.ai.confirmedDates||[]).includes(date),column=board.createDiv({cls:`lh-project-day${i===0?' is-today':''}${date===(this.scheduleFocusedDay||dates[0])?' is-focused':''}`,attr:{'data-schedule-date':date}}),head=column.createEl('button',{cls:'lh-schedule-week-day',attr:{type:'button','aria-label':date}});head.onclick=()=>{this.scheduleFocusedDay=date;this.refreshScheduleViews();};
+      head.createSpan({text:i===0?tr('今天'):tr(WEEKDAYS[new Date(date+'T12:00:00Z').getUTCDay()]),cls:'lh-schedule-week-name'});head.createEl('strong',{text:date.slice(8),cls:'lh-schedule-week-number'});head.createSpan({text:confirmed?tr('已确认'):tr('待安排'),cls:'lh-schedule-week-state'});head.createSpan({text:scheduleDaySummary(rest?context:daily,{tasks:this.state.tasks,choices:this.state.calendarChoices}),cls:'lh-schedule-week-summary'});
+      const list=column.createDiv({cls:'lh-project-day-cards'});if(!daily.length){const empty=list.createDiv({cls:'lh-project-day-empty'});setIcon(empty.createSpan(),rest?'coffee':'circle-dashed');empty.createSpan({text:rest?tr('休息日'):tr('尚未安排任务')});}
+      for(const item of daily){const linked=this.state.tasks.find(task=>task.id===item.taskId),display=scheduleItemState(item,{tasks:this.state.tasks,choices:this.state.calendarChoices,outcomes:this.state.eventOutcomes,now:localNow()}),card=list.createDiv({cls:`lh-project-card${display.overdue?' is-overdue':''}${display.status&&display.status!=='unfinished'?' is-complete':''}`});card.createEl('time',{text:item.start.slice(11)+'–'+item.end.slice(11)});const title=card.createEl('button',{text:this.itemDisplayTitle(item),cls:'lh-project-card-title',attr:{type:'button'}});title.onclick=()=>this.openScheduleItem(item);if(linked?.urgent)card.createSpan({text:tr('紧急'),cls:'lh-task-urgent-badge'});const foot=card.createDiv({cls:'lh-project-card-foot'});foot.createSpan({text:item.course?.split(' - ')[0]||linked?.course?.split(' - ')[0]||tr(item.source==='profile-setting'?'规划复盘':item.kind==='preview'?'预习':item.kind==='review'||item.kind==='recall'?'复习':'任务')});if(display.status){const status=foot.createEl('button',{text:display.status==='unfinished'?tr('未完成'):tr('已完成'),cls:'lh-project-card-status',attr:{type:'button'}});status.onclick=()=>this.recordOutcome(linked&&!isLongTerm(linked)?linked:item,linked&&!isLongTerm(linked)?'task':'slot');}}
+    }
+    const assigned=new Set(projects.map(item=>item.taskId).filter(Boolean)),waiting=this.state.tasks.filter(taskVisible).filter(task=>taskStatus(task)==='unfinished'&&!assigned.has(task.id));if(waiting.length){const pending=el.createDiv({cls:'lh-panel lh-project-pending'}),head=pending.createDiv({cls:'lh-section-title'});head.createEl('h2',{text:tr('待安排任务')});head.createSpan({text:tr('{0} 项',[waiting.length])});const rows=pending.createDiv({cls:'lh-project-pending-list'});for(const task of waiting){const row=rows.createEl('button',{cls:'lh-project-pending-task',attr:{type:'button'}});row.createEl('strong',{text:this.itemDisplayTitle(task)});row.createSpan({text:taskDurationLabel(task)});row.onclick=()=>this.openTaskTarget(task);}}
+  }
+  openScheduleItem(item){new ScheduleItemModal(this,item).open();}
+  restSlotRow(host,item){
+    const row=host.createDiv({cls:`lh-slot lh-schedule-rest${item.allDay?' is-all-day':''}`,attr:{'data-rest-id':item.id}});row.createEl('time',{text:item.allDay?tr('全天'):`${item.start.slice(11,16)}–${item.end.slice(11,16)}`});const body=row.createDiv({cls:'lh-slot-body'}),title=body.createDiv({cls:'lh-schedule-rest-title'});setIcon(title.createSpan(),'moon');title.createEl('strong',{text:item.title});body.createSpan({text:item.description||tr(item.restLabel?'已按时间规则留出休息':'按时间规则不可安排学习任务'),cls:'lh-slot-source'});
   }
   async refreshScheduleViews(){
     for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='schedule')await leaf.view.render();
+    this.scheduleAdjustmentModal?.render();
   }
   renderScheduleProgress(host,analysis){
     const progress=host.createDiv({cls:'lh-preview-generating lh-schedule-progress',attr:{role:'status','aria-live':'polite'}});
     progress.createSpan({cls:'lh-analysis-spinner'});progress.createDiv({text:tr("正在安排未来 7 天"),cls:'lh-preview-generating-title'});
     const steps=progress.createDiv({cls:'lh-preview-progress-steps'});analysis.stepEls=[tr("读取日程"),tr("AI 排程"),tr("检查冲突")].map(label=>steps.createSpan({text:label}));
-    analysis.statusEl=progress.createEl('p',{cls:'lh-preview-stage'});analysis.elapsedEl=progress.createEl('p',{cls:'lh-preview-elapsed'});analysis.usageEl=progress.createEl('p',{cls:'lh-preview-usage'});
+    analysis.statusEl=progress.createEl('p',{cls:'lh-preview-stage'});analysis.elapsedEl=progress.createEl('p',{cls:'lh-preview-elapsed'});analysis.usageEl=progress.createDiv({cls:'lh-preview-usage'});
     const reasoning=progress.createDiv({cls:'lh-preview-reasoning'}),head=reasoning.createDiv({cls:'lh-preview-reasoning-head'});
     head.createDiv({text:tr("思考摘要"),cls:'lh-preview-reasoning-label'});
     const thinking=head.createDiv({cls:'lh-preview-thinking',attr:{'aria-label':tr("正在思考")}});thinking.createSpan({text:tr("思考中")});
@@ -1804,7 +1986,7 @@ module.exports=class LearningHub extends Plugin {
     const model=this.state.ai.model||tr("Codex 默认"),effort=this.state.ai.effort||tr("模型默认");
     const received=analysis.receivedChars?tr(" · 已接收 {0} 字符",[analysis.receivedChars.toLocaleString()]):'';
     analysis.elapsedEl?.setText(tr("已用时 {0}{1} · {2} / {3}",[duration,received,model,effort]));
-    analysis.usageEl?.setText(analysis.tokenUsage?formatCodexUsage(analysis.tokenUsage):'');
+    renderTokenUsage(analysis.usageEl,analysis.tokenUsage);
     if(analysis.reasoningSummary)this.renderScheduleReasoning(analysis);
   }
   renderScheduleReasoning(analysis){
@@ -1828,17 +2010,9 @@ module.exports=class LearningHub extends Plugin {
       host.replaceChildren(...staging.childNodes);
     },100);
   }
-  async reviewScheduleTasks(){
-    const tasks=[];
-    for(const course of this.courses)for(const lesson of this.lessons(course)){
-      if(!this.scope(lesson,course))continue;
-      const flow=await this.readFlow(lesson);
-      for(const round of this.reviewPlan(flow))if(round.unlocked&&!round.completedAt)tasks.push({id:`review:${lesson.path}:${round.round}`,title:`${course.split(' - ')[0]} ${lesson.basename} · 第 ${round.round} 轮复习`,minutes:[10,15,20][round.round-1],due:round.due<today()?today():round.due,source:'间隔复习',kind:'review',lessonPath:lesson.path,course,round:round.round});
-    }
-    return tasks;
-  }
+  async reviewScheduleTasks(startDate=today(),days=7){return (await this.courseStudyTasks(startDate,days)).reviews;}
   async generateScheduleDraft(button){
-    if(this.scheduleAnalysis)return;
+    if(this.scheduleAnalysis||this.scheduleDraftAdjustment)return;
     const buttonLabel=button?.getText();
     if(button){button.disabled=true;button.setText(tr("正在生成日程草案…"));}
     const analysis=this.scheduleAnalysis={phase:'syncing',startedAt:Date.now(),receivedChars:0,tokenUsage:null,reasoningSummary:'',reasoningIndex:null};
@@ -1847,10 +2021,14 @@ module.exports=class LearningHub extends Plugin {
       await this.refreshScheduleViews();
       if(this.state.googleCalendar.tokens)await this.syncGoogleCalendar({quiet:true});
       analysis.phase='preparing';this.updateScheduleProgress(analysis);
+      if(!this.state.ai.dailyRoutine?.wakeTime||!this.state.ai.dailyRoutine?.sleepTime){this.openAvailabilitySettings();new Notice(tr('请先通过 AI 设定每天的起床和睡觉时间。'));return;}
+      normalizeRoutine(this.state.ai.dailyRoutine);
       const request=await this.scheduleInputs();
+      if(!request.editableDates.length){new Notice(tr('未来七天均已确认，无需重复生成。'));return;}
       if(!request.tasks.length&&!request.mealRequirements.length){new Notice(tr("请先添加待办或完成待复习讲次；当前没有可排的任务或用餐时间。"));return;}
       analysis.phase='queued';this.updateScheduleProgress(analysis);
       const raw=await this.runAi(request.prompt,request.schema,{
+        timeoutMs:8*60*1000,
         onStatus:phase=>{analysis.phase=phase;this.updateScheduleProgress(analysis);},
         onProgress:delta=>{analysis.receivedChars+=String(delta||'').length;this.updateScheduleProgress(analysis);},
         onTokenUsage:usage=>{analysis.tokenUsage=usage;this.updateScheduleProgress(analysis);},
@@ -1858,48 +2036,118 @@ module.exports=class LearningHub extends Plugin {
       });
       analysis.phase='validating';this.updateScheduleProgress(analysis);
       const draft=validateScheduleDraft(raw,request);
-      this.state.scheduleDraft={request:{...request,prompt:undefined,schema:undefined},draft,createdAt:now()};
+      this.state.scheduleDraft={id:crypto.randomUUID(),request:{...request,prompt:undefined,schema:undefined},draft,conversation:[],createdAt:now()};
       await this.saveData(this.state);
       clearInterval(analysis.timer);this.scheduleAnalysis=null;
       await this.open(SCHEDULE);
       for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='schedule')await leaf.view.render();
-      new Notice(draft.valid?tr("AI 日程草案已生成，请核对后采用。"):tr("草案有时间冲突，请检查或重新生成。"));
+      new Notice(draft.valid?tr("AI 日程草案已生成，可继续对话调整后再确认。"):tr("AI 草案有时间冲突，可以在草案下方对话调整。"));
     }catch(error){console.error('Learning Hub schedule AI:',error);new Notice(tr("日程草案未生成：{0}", [error.message]));}
-    finally{clearInterval(analysis.timer);clearTimeout(analysis.reasoningRenderTimer);analysis.reasoningRenderVersion=(analysis.reasoningRenderVersion||0)+1;if(this.scheduleAnalysis===analysis)this.scheduleAnalysis=null;if(button?.isConnected){button.disabled=false;button.setText(buttonLabel||tr("AI 生成 7 天草案"));}await this.refreshScheduleViews();}
+    finally{clearInterval(analysis.timer);clearTimeout(analysis.reasoningRenderTimer);analysis.reasoningRenderVersion=(analysis.reasoningRenderVersion||0)+1;if(this.scheduleAnalysis===analysis)this.scheduleAnalysis=null;if(button?.isConnected){button.disabled=false;button.setText(buttonLabel||tr("AI 安排七天"));}await this.refreshScheduleViews();}
+  }
+  async openScheduleAdjustment(){
+    if(this.scheduleAnalysis||this.scheduleDraftAdjustment)return;
+    if(!this.state.scheduleDraft){
+      try{
+        const request=await this.scheduleInputs(today(),7,{adjust:true});
+        const slots=this.state.slots.filter(slot=>slot.source==='ai'&&request.dates.includes(slot.start.slice(0,10))&&slot.start>=request.currentLocal&&!['on-time','late'].includes(slot.status));
+        const systemSlots=this.state.slots.filter(slot=>slot.source==='system-schedule'&&request.dates.includes(slot.start.slice(0,10))&&slot.start>=request.currentLocal).map(slot=>({meal:slot.mealKind,start:slot.start,end:slot.end}));
+        const draft=validateScheduleDraft({summary:tr('当前已确认日程的调整预览，请描述需要移除、替换或移动的部分。'),slots,systemSlots,unscheduled:[]},request);
+        this.state.scheduleDraft={id:crypto.randomUUID(),mode:'adjust',request:{...request,prompt:undefined,schema:undefined},draft,conversation:[],createdAt:now()};
+        await this.saveData(this.state);
+      }catch(error){new Notice(error.message);return;}
+    }
+    if(this.scheduleAdjustmentModal&&!this.scheduleAdjustmentModal.closed)this.scheduleAdjustmentModal.render();else new ScheduleAdjustmentModal(this).open();
+  }
+  async adjustScheduleDraft(message){
+    const saved=this.state.scheduleDraft,text=String(message||'').trim();
+    if(!saved||!text||this.scheduleDraftAdjustment||this.scheduleAnalysis)return;
+    const draftId=saved.id||saved.createdAt||'schedule-draft',conversation=[...(saved.conversation||[]),{role:'user',content:text,at:now()}];
+    this.state.scheduleDraft={...saved,id:draftId,conversation};
+    const adjustment=this.scheduleDraftAdjustment={draftId,phase:'preparing',startedAt:Date.now(),receivedChars:0,controller:new AbortController()};
+    const update=()=>{for(const root of [...this.app.workspace.getLeavesOfType(MAIN).map(leaf=>leaf.view?.contentEl),this.scheduleAdjustmentModal?.contentEl].filter(Boolean))for(const el of root.querySelectorAll('.lh-schedule-adjustment-status'))el.setText(`DeepSeek · ${this.state.deepseek.model} / ${this.state.deepseek.effort} · ${Math.floor((Date.now()-adjustment.startedAt)/1000)}s · ${tr('已接收 {0} 字符',[adjustment.receivedChars])}`);};
+    adjustment.timer=setInterval(update,1000);
+    try{
+      await this.saveData(this.state);await this.refreshScheduleViews();
+      const request=this.state.scheduleDraft?.id===draftId?this.state.scheduleDraft.request:null;
+      if(!request)throw new Error(tr("日程草案已关闭，请重新生成。"));
+      const prompt=buildScheduleAdjustmentPrompt({request,draft:saved.draft,conversation,language:normalizeInterfaceLanguage(this.state.interfaceLanguage)});
+      adjustment.phase='generating';
+      if(!this.state.deepseek.apiKey)throw new Error(tr('请先在 Learning Hub 设置中填写 DeepSeek API Key。'));
+      const result=await this.callDeepSeek({user:text,systemPrompt:prompt,languageScope:'system',responseFormat:{type:'json_object'},thinking:this.state.deepseek.effort!=='none',reasoningEffort:this.state.deepseek.effort,signal:adjustment.controller.signal,onContentDelta:delta=>{adjustment.receivedChars+=delta.length;update();}});
+      const raw=JSON.parse(result.content.replace(/^```(?:json)?\s*|\s*```$/g,''));
+      if(this.state.scheduleDraft?.id!==draftId)return;
+      const checked=validateScheduleDraft(raw,request),reply=String(raw.reply||'').trim()||tr("已根据你的要求检查日程草案。"),feedback=checked.valid?reply:`${reply}\n\n${tr("这次调整未通过日程检查，原草案保持不变：{0}",[checked.conflicts.slice(0,3).map(item=>item.message).join('；')])}`;
+      this.state.scheduleDraft={...this.state.scheduleDraft,...(checked.valid?{draft:checked}:{}),conversation:[...conversation,{role:'assistant',content:feedback,at:now()}],updatedAt:now()};
+      await this.saveData(this.state);
+      if(!checked.valid)new Notice(tr("调整未应用到草案，请继续描述希望的时间。"));
+    }catch(error){
+      if(this.state.scheduleDraft?.id===draftId){
+        this.state.scheduleDraft={...this.state.scheduleDraft,conversation:[...(this.state.scheduleDraft.conversation||[]),{role:'assistant',content:tr("调整失败：{0}",[error.message||error]),at:now()}]};
+        try{await this.saveData(this.state);}catch(saveError){console.error('Learning Hub schedule adjustment save:',saveError);}
+      }
+      new Notice(tr("日程调整失败：{0}",[error.message||error]));
+    }finally{
+      clearInterval(adjustment.timer);if(this.scheduleDraftAdjustment===adjustment)this.scheduleDraftAdjustment=null;
+      await this.refreshScheduleViews();
+    }
   }
   renderScheduleDraft(el){
     const saved=this.state.scheduleDraft,{draft,request}=saved;
     const panel=el.createDiv({cls:'lh-panel lh-schedule-draft'});
-    const head=panel.createDiv({cls:'lh-section-title'});head.createEl('h2',{text:tr("待确认的 AI 日程")});head.createSpan({text:`${request.startDate} — ${request.endDate}`});
+    const head=panel.createDiv({cls:'lh-section-title'});head.createEl('h2',{text:saved.mode==='adjust'?tr('当前调整预览'):tr("待确认的 AI 日程")});head.createSpan({text:`${request.startDate} — ${request.endDate}`});
+    panel.createDiv({text:`${tr('本次应用日期')}：${(request.editableDates||request.dates).join('、')}`,cls:'lh-flow-muted'});
     const body=panel.createDiv({cls:'lh-schedule-draft-body'});
+    const eligible=request.editableDates||request.dates,selectedDates=new Set((saved.selectedDates||eligible).filter(date=>eligible.includes(date)));
+    const datePicker=body.createDiv({cls:'lh-schedule-date-picker'});datePicker.createEl('strong',{text:tr('选择要确认的日期')});
+    for(const date of eligible){const label=datePicker.createEl('label',{cls:'lh-attendance-toggle'}),check=label.createEl('input',{attr:{type:'checkbox'}});check.checked=selectedDates.has(date);label.createSpan({text:date});check.onchange=()=>{if(check.checked)selectedDates.add(date);else selectedDates.delete(date);saved.selectedDates=[...selectedDates];accept.disabled=!draft.valid||!compatible||adjusting||!selectedDates.size;};}
     body.createEl('p',{text:draft.summary||tr("AI 未提供安排摘要。"),cls:'lh-section-description'});
     const compatible=Array.isArray(draft.systemSlots);if(!compatible)body.createDiv({text:tr("此草案缺少系统用餐安排，请舍弃并重新生成。"),cls:'lh-draft-conflict'});
     for(const item of draft.conflicts||[])body.createDiv({text:tr("冲突：{0}", [item.message]),cls:'lh-draft-conflict'});
     for(const item of draft.warnings||[])body.createDiv({text:tr("提醒：{0}", [item.message]),cls:'lh-flow-muted'});
-    if(draft.systemSlots?.length){body.createEl('strong',{text:tr("系统日程 · 用餐时间"),cls:'lh-schedule-system-heading'});for(const slot of draft.systemSlots){const row=body.createDiv({cls:'lh-draft-slot is-system'});row.createSpan({text:`${slot.start.slice(5).replace('T',' ')}–${slot.end.slice(11)}`});row.createEl('strong',{text:slot.title});row.createSpan({text:tr("系统用餐安排 · 无需标记完成")});}}
+    if(draft.systemSlots?.length){body.createEl('strong',{text:tr("系统日程 · 用餐、运动与洗澡"),cls:'lh-schedule-system-heading'});for(const slot of draft.systemSlots){const row=body.createDiv({cls:'lh-draft-slot is-system'});row.createSpan({text:`${slot.start.slice(5).replace('T',' ')}–${slot.end.slice(11)}`});row.createEl('strong',{text:slot.title});row.createSpan({text:tr("每日生活安排 · 无需标记完成")});}}
     for(const slot of draft.slots||[]){const row=body.createDiv({cls:'lh-draft-slot'});row.createSpan({text:`${slot.start.slice(5).replace('T',' ')}–${slot.end.slice(11)}`});row.createEl('strong',{text:slot.title});row.createSpan({text:slot.reason||''});}
     for(const item of draft.unscheduled||[])body.createDiv({text:tr("未安排：{0} · {1}", [item.title, item.reason]),cls:'lh-flow-muted'});
+    const conversation=body.createDiv({cls:'lh-schedule-conversation'});
+    const conversationHead=conversation.createDiv({cls:'lh-schedule-conversation-head'});conversationHead.createEl('strong',{text:tr("和 DeepSeek 继续调整")});conversationHead.createSpan({text:tr("可以直接说要改哪一天、哪项任务或希望的时间")});
+    const messages=conversation.createDiv({cls:'lh-schedule-conversation-messages'}),turns=saved.conversation||[];
+    if(!turns.length)messages.createDiv({text:tr("例如：把周三的复习移到周四晚上；周五下午留空。每次调整都会重新检查冲突，正式日程仍要点击下方确认。"),cls:'lh-schedule-conversation-hint'});
+    for(const turn of turns){const item=messages.createDiv({cls:`lh-schedule-conversation-message is-${turn.role==='user'?'user':'assistant'}`});item.createDiv({text:turn.role==='user'?tr("你"):'DeepSeek',cls:'lh-schedule-conversation-role'});item.createDiv({text:turn.content,cls:'lh-schedule-conversation-content'});}
+    const adjusting=this.scheduleDraftAdjustment?.draftId===(saved.id||saved.createdAt||'schedule-draft');
+    if(adjusting){const pending=messages.createDiv({cls:'lh-schedule-conversation-pending'});pending.createSpan({cls:'lh-analysis-spinner'});pending.createSpan({text:tr("DeepSeek 正在根据你的要求调整日程…"),cls:'lh-schedule-adjustment-status'});const stop=pending.createEl('button',{text:tr('停止')});stop.onclick=()=>this.scheduleDraftAdjustment?.controller.abort();}
+    const composer=conversation.createDiv({cls:'lh-schedule-conversation-composer'});
+    const input=composer.createEl('textarea',{attr:{rows:'2',maxlength:'2000',placeholder:tr("描述你想怎样调整这份日程…"),'aria-label':tr("日程调整要求")}});input.disabled=adjusting;
+    const send=composer.createEl('button',{text:adjusting?tr("正在调整…"):tr("发送并调整"),cls:'lh-primary'});send.disabled=adjusting;
+    const submit=()=>{const value=input.value.trim();if(!value||adjusting)return;input.value='';void this.adjustScheduleDraft(value);};send.onclick=submit;input.onkeydown=event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();submit();}};
+    messages.scrollTop=messages.scrollHeight;
     const actions=body.createDiv({cls:'lh-confirm-actions'});
-    const accept=actions.createEl('button',{text:tr("确认并应用日程"),cls:'lh-primary'});accept.disabled=!draft.valid||!compatible;
-    accept.onclick=()=>new ConfirmModal(this.app,tr("确认 AI 日程"),tr("确认后将替换这 7 天内此前由 AI 安排的学习时段和系统用餐安排；手动录入的日程会保留。"),tr("确认应用"),async()=>{
+    const accept=actions.createEl('button',{text:tr("确认并应用日程"),cls:'lh-primary'});accept.disabled=!draft.valid||!compatible||adjusting||!selectedDates.size;
+    accept.onclick=()=>new ConfirmModal(this.app,tr("确认 AI 日程"),tr("确认后应用预览中日期的调整；生成七天时跳过已确认日期，手动事项与已开始、已完成的安排会保留。"),tr("确认应用"),async()=>{
+      normalizeRoutine(this.state.ai.dailyRoutine);
       if(this.state.googleCalendar.tokens)await this.syncGoogleCalendar({quiet:true});
-      const updated=await this.scheduleInputs(request.startDate,request.dates.length);
-      const fresh=validateScheduleDraft({slots:draft.slots,systemSlots:draft.systemSlots,unscheduled:draft.unscheduled,summary:draft.summary},updated);
+      const current=await this.scheduleInputs(request.startDate,request.dates.length,{adjust:saved.mode==='adjust'});
+      const chosen=current.editableDates.filter(date=>selectedDates.has(date));if(!chosen.length)throw new Error(tr('请选择尚未确认的日期。'));
+      const updated={...current,editableDates:chosen,availability:current.availability.filter(window=>chosen.includes(window.start.slice(0,10))),mealRequirements:current.mealRequirements.filter(item=>chosen.includes(item.date)),fixedBlocks:current.fixedBlocks.filter(block=>chosen.includes(block.start.slice(0,10)))};
+      const fresh=validateScheduleDraft({slots:draft.slots.filter(slot=>chosen.includes(slot.start.slice(0,10))),systemSlots:draft.systemSlots.filter(slot=>chosen.includes(slot.start.slice(0,10))),unscheduled:draft.unscheduled,summary:draft.summary},updated);
       if(!fresh.valid)throw new Error(tr("日程已变化：{0}", [fresh.conflicts[0].message]));
+      const previousSlots=this.state.slots,previousConfirmed=this.state.ai.confirmedDates,previousSummary=this.state.aiSummary;
       this.state.slots=acceptScheduleDraft(this.state.slots,fresh,updated);
+      this.state.ai.confirmedDates=[...new Set([...(this.state.ai.confirmedDates||[]),...updated.editableDates])];
       this.state.aiSummary={text:draft.summary,date:today()};
-      delete this.state.scheduleDraft;await this.save();
+      delete this.state.scheduleDraft;try{await this.save();}catch(error){this.state.slots=previousSlots;this.state.ai.confirmedDates=previousConfirmed;this.state.aiSummary=previousSummary;this.state.scheduleDraft=saved;throw error;}
+      this.scheduleAdjustmentModal?.close();
       for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='schedule')await leaf.view.render();
     }).open();
-    const discard=actions.createEl('button',{text:tr("舍弃草案")});discard.onclick=async()=>{delete this.state.scheduleDraft;await this.saveData(this.state);for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='schedule')await leaf.view.render();};
+    const discard=actions.createEl('button',{text:tr("舍弃草案")});discard.disabled=adjusting;discard.onclick=async()=>{delete this.state.scheduleDraft;await this.saveData(this.state);this.scheduleAdjustmentModal?.close();for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='schedule')await leaf.view.render();};
   }
-  renderTasks(el){
-    el.empty();el.addClass('learning-hub','lh-tasks');this.header(el,tr("TO DO"),tr("待办事项"),tr("写下事项与可选说明、DDL；系统估算用时并纳入未来 7 天日程。"));
+  async renderTasks(el){
+    await this.syncLearningTodos();
+    el.empty();el.addClass('learning-hub','lh-tasks');this.header(el,tr("TO DO"),tr("待办事项"),tr("紧急任务优先安排；置顶用于长期关注。可填写预计用时，或选择无结束日期的长期项目。"));
     const top=el.createDiv({cls:'lh-schedule-actions'});const add=top.createEl('button',{text:tr("＋ 添加待办"),cls:'lh-primary'});add.onclick=()=>this.addTask();const ai=top.createEl('button',{text:tr("和 AI 对话添加"),cls:'lh-secondary'});ai.onclick=()=>new TaskIntakeModal(this).open();this.navText(top,tr("查看完整日程 →"),SCHEDULE);this.navText(top,tr("查看复盘 →"),RETROSPECT);
-    const all=[...this.state.tasks].sort((a,b)=>(a.due||'9999').localeCompare(b.due||'9999'));
-    for(const [label,items] of [[tr("待完成"),all.filter(t=>taskStatus(t)==='unfinished')],[tr("已完成"),all.filter(t=>taskStatus(t)!=='unfinished')]]){
+    const all=this.state.tasks.filter(taskVisible).sort((a,b)=>compareTaskPriority(a,b)||Number(!!b.pinned)-Number(!!a.pinned));
+    for(const [label,items] of [[tr("待完成"),all.filter(t=>!isLongTerm(t)&&taskStatus(t)==='unfinished')],[tr('长期项目'),all.filter(t=>isLongTerm(t)&&taskStatus(t)==='unfinished')],[tr("已完成"),all.filter(t=>taskStatus(t)!=='unfinished')]]){
       const list=el.createDiv({cls:'lh-panel lh-task-list'});const head=list.createDiv({cls:'lh-section-title'});head.createEl('h2',{text:label});head.createSpan({text:String(items.length)});
-      if(!items.length)list.createDiv({text:label===tr("待完成")?tr("当前没有待办。"):tr("尚无完成记录。"),cls:'lh-empty'});
+      if(!items.length)list.createDiv({text:label===tr("待完成")?tr("当前没有待办。"):label===tr('长期项目')?tr('暂无长期项目。'):tr("尚无完成记录。"),cls:'lh-empty'});
       for(const task of items)this.taskRow(list,task);
     }
   }
@@ -1955,7 +2203,7 @@ module.exports=class LearningHub extends Plugin {
     }
   }
   renderHomeworkStatus(el,assignment){
-    const labels={queued:tr("等待 AI 分析"),extracting:tr("正在提取作业文字"),organizing:tr("正在整理完整题目"),analyzing:tr("正在分析难度与知识点")};
+    const labels={queued:tr("等待 AI 分析"),extracting:tr("正在提取作业文字"),organizing:tr("正在整理完整题目"),analyzing:tr("正在分析难度、知识点与用时")};
     const status=assignment.analysisStatus;
     if(labels[status]){
       const interrupted=!this.homeworkRunning?.has(assignment.id)&&status!=='queued';
@@ -1980,117 +2228,52 @@ module.exports=class LearningHub extends Plugin {
     }else if(status==='complete')el.createSpan({text:tr("题目与知识点已整理"),cls:'lh-analysis-done'});
     else{el.createSpan({text:tr("尚未进行 AI 分析")});const retry=el.createEl('button',{text:tr("分析作业")});retry.onclick=()=>void this.analyzeHomework(assignment.course,assignment.id).catch(error=>new Notice(error.message));}
   }
-  async renderHomeworkQuestions(card,course,assignment){
-    if(assignment.analysisStatus!=='complete')return;
-    const analysis=await this.readHomeworkAnalysis(course,assignment.id);
-    if(!analysis?.questions?.length){card.createDiv({text:tr("整理结果暂不可用，请重新分析。"),cls:'lh-assignment-warning'});return;}
-    this.homeworkOpenDetails||=new Set();
-    const section=card.createEl('details',{cls:'lh-homework-questions'});
-    section.open=this.homeworkOpenDetails.has(assignment.id);
-    const summary=section.createEl('summary');
-    summary.createSpan({text:tr("查看详情")});
-    summary.createSpan({text:tr("{0} 道题", [analysis.questions.length]),cls:'lh-homework-question-count'});
-    let rendered=false;
-    const render=()=>{if(!section.open){this.homeworkOpenDetails.delete(assignment.id);return;}this.homeworkOpenDetails.add(assignment.id);if(rendered)return;rendered=true;void this.renderHomeworkQuestionList(section,course,assignment,analysis.questions).catch(error=>{console.error('Learning Hub homework rendering:',error);section.createDiv({text:tr("题目显示失败，请关闭详情后重试。"),cls:'lh-assignment-warning'});rendered=false;});};
-    section.addEventListener('toggle',render);
-    if(section.open)render();
-  }
   async renderHomeworkQuestionList(section,course,assignment,questions){
     const list=section.createDiv({cls:'lh-homework-question-list'});
+    const body=async(parent,markdown,cls='')=>{const el=parent.createDiv({cls:`lh-homework-question-body markdown-rendered ${cls}`});await this.renderPreviewMarkdown(el,markdown,{path:this.homeworkContentPath(course,assignment.id)});};
+    const markButton=(head,question,part=false)=>{let selected=(assignment.wrongQuestionIds||[]).includes(question.id);const mark=head.createEl('button',{text:selected?tr('已标记错题 · 取消'):part?tr('标记此小问'):tr('标记整题'),cls:`lh-homework-wrong${selected?' is-wrong':''}`,attr:{type:'button','aria-pressed':String(selected),'aria-label':`${question.label} · ${part?tr('标记此小问'):tr('标记整题')}`}});mark.onclick=async()=>{mark.disabled=true;try{await this.setHomeworkWrongQuestion(course,assignment.id,question.id,!selected);selected=!selected;mark.setText(selected?tr('已标记错题 · 取消'):part?tr('标记此小问'):tr('标记整题'));mark.classList.toggle('is-wrong',selected);mark.setAttribute('aria-pressed',String(selected));}catch(error){new Notice(error.message);}finally{mark.disabled=false;}};};
     for(const question of questions){
-      const row=list.createDiv({cls:'lh-homework-question'});
-      const head=row.createDiv({cls:'lh-homework-question-head'});head.createEl('strong',{text:question.label});
-      const selected=(assignment.wrongQuestionIds||[]).includes(question.id);
-      const mark=head.createEl('button',{text:selected?tr("已标记错题 · 取消"):tr("标记为错题"),cls:selected?'is-wrong':''});
-      mark.onclick=async()=>{mark.disabled=true;try{await this.setHomeworkWrongQuestion(course,assignment.id,question.id,!selected);}catch(error){new Notice(error.message);mark.disabled=false;}};
-      const body=row.createDiv({cls:'lh-homework-question-body markdown-rendered'});
-      try{if(MarkdownRenderer?.render)await MarkdownRenderer.render(this.app,question.markdown,body,this.homeworkContentPath(course,assignment.id),this);else if(MarkdownRenderer?.renderMarkdown)await MarkdownRenderer.renderMarkdown(question.markdown,body,this.homeworkContentPath(course,assignment.id),this);else body.setText(question.markdown);}
-      catch(error){console.warn('Learning Hub homework Markdown:',error);body.setText(question.markdown);}
+      const row=list.createDiv({cls:'lh-homework-question',attr:{'data-question-id':question.id}}),head=row.createDiv({cls:'lh-homework-question-head'});head.createEl('h3',{text:question.label});if(question.estimatedMinutes)head.createSpan({text:tr('预计 {0} 分钟',[question.estimatedMinutes]),cls:'lh-homework-question-estimate'});markButton(head,question);
+      const parts=question.subquestions||[];
+      if(!parts.length)await body(row,question.markdown);else if(question.contextMarkdown)await body(row,question.contextMarkdown,'lh-homework-common-context');
       if(question.topics?.length)row.createDiv({text:question.topics.join(' · '),cls:'lh-homework-question-topics'});
+      for(const part of parts){const block=row.createDiv({cls:'lh-homework-subquestion',attr:{'data-question-id':part.id}}),head=block.createDiv({cls:'lh-homework-question-head'});head.createEl('h4',{text:part.label});if(part.estimatedMinutes)head.createSpan({text:tr('预计 {0} 分钟',[part.estimatedMinutes]),cls:'lh-homework-question-estimate'});markButton(head,part,true);if(part.contextMarkdown)await body(block,part.contextMarkdown,'lh-homework-common-context');await body(block,part.markdown);if(part.topics?.length)block.createDiv({text:part.topics.join(' · '),cls:'lh-homework-question-topics'});}
+      if(parts.length){const original=row.createEl('details',{cls:'lh-homework-original-question'});original.createEl('summary',{text:tr('查看完整大题')});await body(original,question.markdown);}
     }
   }
-  async renderLabSection(el,course){
-    const store=await this.readLabs(course),sorted=[...store.labs].sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-    const section=el.createDiv({cls:'lh-assignment-section'});
-    const heading=section.createDiv({cls:'lh-assignment-section-head'});heading.createEl('h2',{text:tr("Lab Sessions · 可选")});heading.createSpan({text:tr("{0} 份", [sorted.length])});
-    const introduction=section.createDiv({cls:'lh-assignment-section-intro'});
-    introduction.createEl('p',{text:tr("上传 PDF、Markdown 或 TXT 课件，AI 整理实验目标、步骤和提交要求；这里不记录错题。"),cls:'lh-section-description'});
-    if(!sorted.length){introduction.createDiv({text:tr("这门课程还没有 Lab Session；没有实验课可以留空。"),cls:'lh-section-empty'});return;}
-    const list=section.createDiv({cls:'lh-assignment-list'});
-    for(const lab of sorted){
-      const card=list.createDiv({cls:'lh-assignment-card'});
-      const top=card.createDiv({cls:'lh-assignment-card-head'}),identity=top.createDiv({cls:'lh-assignment-identity'});
-      identity.createEl('h3',{text:lab.title});
-      identity.createSpan({text:tr("{0} · {1} 个文件{2}{3}", [lab.lessonPath?.split('/').at(-1)?.replace(/\.md$/,'')||tr("整个课程"), lab.files?.length||0, lab.due?tr(" · 截止 {0}", [lab.due]):'', lab.archivedAt?tr(" · 已归档"):''])});
-      const status=card.createDiv({cls:'lh-homework-analysis-status'});
-      const state=lab.analysisStatus;
-      if(state==='extracting'||state==='analyzing'){
-        if(this.labRunning?.has(lab.id))status.createSpan({cls:'lh-analysis-spinner'});
-        status.createSpan({text:this.labRunning?.has(lab.id)?state==='extracting'?tr("正在提取课件文字"):tr("正在解析 Lab Session"):tr("上次解析已中断"),cls:'lh-analysis-label'});
-      }else if(state==='complete')status.createSpan({text:tr("课件已解析"),cls:'lh-analysis-done'});
-      else if(state==='failed')status.createSpan({text:tr("解析失败：{0}", [lab.analysisError||tr("未知原因")]),cls:'lh-assignment-warning'});
-      else status.createSpan({text:tr("等待解析"),cls:'lh-analysis-label'});
-      const topics=card.createDiv({cls:'lh-assignment-topics'});for(const topic of lab.topics||[])topics.createSpan({text:topic});
-      const files=card.createDiv({cls:'lh-assignment-files'});for(const file of lab.files||[]){const link=files.createEl('button',{text:file.name,cls:'lh-assignment-file'});link.onclick=()=>this.open(file.path);}
-      if(lab.importStatus==='partial')files.createSpan({text:tr("未导入：{0}", [(lab.failedFiles||[]).join('、')]),cls:'lh-assignment-warning'});
-      if(state==='complete'){
-        const details=card.createEl('details',{cls:'lh-homework-questions'}),summary=details.createEl('summary');summary.createSpan({text:tr("查看解析内容")});
-        details.addEventListener('toggle',()=>{if(!details.open||details.dataset.loaded)return;details.dataset.loaded='1';void (async()=>{
-          try{const markdown=await this.app.vault.adapter.read(this.labContentPath(course,lab.id));const body=details.createDiv({cls:'lh-homework-question-body markdown-rendered'});
-            if(MarkdownRenderer?.render)await MarkdownRenderer.render(this.app,markdown,body,this.labContentPath(course,lab.id),this);
-            else if(MarkdownRenderer?.renderMarkdown)await MarkdownRenderer.renderMarkdown(markdown,body,this.labContentPath(course,lab.id),this);
-            else body.setText(markdown);
-          }catch(error){details.createDiv({text:tr("无法显示解析内容：{0}", [error.message]),cls:'lh-assignment-warning'});delete details.dataset.loaded;}
-        })();});
-      }
-      const controls=card.createDiv({cls:'lh-assignment-controls'});
-      const edit=controls.createEl('button',{text:tr("编辑信息")});edit.onclick=()=>this.editLab(course,lab);
-      const retry=controls.createEl('button',{text:state==='complete'?tr("重新解析"):tr("解析课件")});retry.disabled=!lab.files?.length||this.labRunning?.has(lab.id);retry.onclick=()=>void this.analyzeLab(course,lab.id).catch(error=>new Notice(error.message));
-      const archive=controls.createEl('button',{text:lab.archivedAt?tr("移出归档"):tr("归档")});archive.onclick=()=>this.toggleLabArchive(course,lab.id);
-      const remove=controls.createEl('button',{text:tr("删除 Lab Session"),cls:'lh-assignment-delete'});
-      remove.onclick=()=>new ConfirmModal(this.app,tr("删除这份 Lab Session？"),tr("《{0}》的原文件会移入 Obsidian 回收站，解析内容转入隐藏的恢复目录。", [lab.title]),tr("确认删除"),()=>this.deleteLab(course,lab.id)).open();
-    }
-  }
+  async openHomework(course,id){return this.openHub('homework',course,undefined,null,0,id);}
+  async syncCourseHomeworkTodos(course,store){const changed=store.assignments.map(a=>this.syncHomeworkTodo(course,a)).some(Boolean);if(changed){await this.writeJson(this.assignmentPath(course),store);await this.saveHomeworkTaskChanges();}}
   async renderAssignments(el,course){
-    el.empty();el.addClass('learning-hub','lh-assignments');
-    const short=course.split(' - ')[0],store=await this.readAssignments(course);
-    this.header(el,tr("{0} / MATERIALS", [short]),tr("作业与 Lab Session"),tr("作业可整理题目并记录错题；Lab Session 可选，只解析课件。"));
-    const actions=el.createDiv({cls:'lh-assignment-toolbar'});
-    const upload=actions.createEl('button',{text:tr("＋ 上传作业"),cls:'lh-primary'});upload.onclick=()=>this.uploadHomework(course);
-    const uploadLab=actions.createEl('button',{text:tr("＋ 上传 Lab Session"),cls:'lh-secondary'});uploadLab.onclick=()=>this.uploadLab(course);
-    const back=actions.createEl('button',{text:tr("← 返回课程概览"),cls:'lh-text-link'});back.onclick=()=>this.openHub('course',course);
-    const sorted=[...store.assignments].sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
-    const sections=[[tr("在用作业"),sorted.filter(a=>!a.archivedAt)],[tr("已归档"),sorted.filter(a=>!!a.archivedAt)]];
-    this.homeworkStatusEls=new Map();
-    for(const [label,items] of sections){
-      const section=el.createDiv({cls:'lh-assignment-section'});
-      const heading=section.createDiv({cls:'lh-assignment-section-head'});heading.createEl('h2',{text:label});heading.createSpan({text:tr("{0} 份", [items.length])});
-      if(!items.length){section.createDiv({text:label===tr("在用作业")?tr("还没有作业。上传后会保留原文件，复习时可按知识点选用。"):tr("暂无已归档的作业。"),cls:'lh-empty'});continue;}
-      const list=section.createDiv({cls:'lh-assignment-list'});
-      for(const assignment of items){
-        const card=list.createDiv({cls:'lh-assignment-card'});
-        const top=card.createDiv({cls:'lh-assignment-card-head'});
-        const identity=top.createDiv({cls:'lh-assignment-identity'});identity.createEl('h3',{text:assignment.title});
-        const linkedTask=this.state.tasks.find(task=>task.assignmentId===assignment.id||task.id===assignment.taskId);
-        identity.createSpan({text:[tr("{0} · {1} 个文件", [assignment.lessonPath?.split('/').at(-1)?.replace(/\.md$/,'')||tr("整个课程"), assignment.files?.length||0]),assignment.due?tr("截止 {0}", [assignment.due]):'',linkedTask?tr("已同步到待办"):''].filter(Boolean).join(' · ')});
-        if(assignment.difficulty)top.createSpan({text:tr("难度 {0}/5", [assignment.difficulty]),cls:'lh-assignment-difficulty'});
-        assignment.course=course;
-        const status=card.createDiv({cls:'lh-homework-analysis-status'});this.homeworkStatusEls.set(assignment.id,status);this.renderHomeworkStatus(status,assignment);
-        const topics=card.createDiv({cls:'lh-assignment-topics'});
-        for(const topic of assignment.topics||[])topics.createSpan({text:topic});
-        if(!assignment.topics?.length)topics.createSpan({text:assignment.analysisStatus==='complete'?tr("暂无知识点"):tr("分析完成后显示知识点"),cls:'is-muted'});
-        const files=card.createDiv({cls:'lh-assignment-files'});
-        for(const file of assignment.files||[]){const link=files.createEl('button',{text:file.name,cls:'lh-assignment-file'});link.onclick=()=>this.open(file.path);}
-        if(assignment.importStatus==='partial'||assignment.importStatus==='uploading')files.createSpan({text:assignment.importStatus==='partial'?tr("部分文件导入失败：{0}", [(assignment.failedFiles||[]).join('、')]):tr("文件导入中…"),cls:'lh-assignment-warning'});
-        await this.renderHomeworkQuestions(card,course,assignment);
-        const controls=card.createDiv({cls:'lh-assignment-controls'});
-        const edit=controls.createEl('button',{text:tr("编辑信息")});edit.onclick=()=>this.editHomework(course,assignment);
-        const archive=controls.createEl('button',{text:assignment.archivedAt?tr("移出归档"):tr("归档")});archive.onclick=()=>this.toggleHomeworkArchive(course,assignment.id);
-        const remove=controls.createEl('button',{text:tr("删除作业"),cls:'lh-assignment-delete'});
-        remove.onclick=()=>new ConfirmModal(this.app,tr("删除这份作业？"),tr("《{0}》的原文件会移入 Obsidian 回收站，整理结果转入隐藏的恢复目录，关联待办和未完成的日程安排也会移除，已标记的错题记录也会移除。", [assignment.title]),tr("确认删除"),()=>this.deleteHomework(course,assignment.id)).open();
+    el.empty();el.addClass('learning-hub','lh-assignments');const short=course.split(' - ')[0],store=await this.readAssignments(course);await this.syncCourseHomeworkTodos(course,store);
+    const tab=this.practiceTab?.get(course)||'homework',practice=await this.readLabs(course);
+    const counts={homework:store.assignments.filter(a=>!a.archivedAt).length,tutorial:practice.labs.filter(a=>!a.archivedAt&&materialKind(a)==='tutorial').length,lab:practice.labs.filter(a=>!a.archivedAt&&materialKind(a)==='lab').length};
+    this.renderMaterialsHeader(el,course,tab,counts);
+    if(tab!=='homework'){await this.renderPracticeCatalog(el,course,tab);return;}
+    const sorted=[...store.assignments].sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));this.homeworkStatusEls=new Map();
+    for(const [label,items] of [[tr('在用作业'),sorted.filter(a=>!a.archivedAt)],[tr('已归档'),sorted.filter(a=>a.archivedAt)]]){
+      const archived=label===tr('已归档');if(archived&&!items.length)continue;
+      const section=el.createDiv({cls:'lh-homework-catalog-section'+(archived?' is-archived':'')});if(archived){const head=section.createDiv({cls:'lh-section-title'});head.createEl('h2',{text:label});head.createSpan({text:tr('{0} 份',[items.length])});}
+      if(!items.length){this.renderMaterialsEmpty(section,course,'homework');continue;}
+      const grid=section.createDiv({cls:'lh-homework-catalog'});
+      for(const assignment of items){const card=grid.createDiv({cls:'lh-panel lh-homework-card'}),open=()=>this.openHomework(course,assignment.id);card.onclick=event=>{if(!event.target.closest('button,a,input'))void open();};const top=card.createDiv({cls:'lh-homework-card-head'});setIcon(top.createSpan({cls:'lh-homework-card-icon'}),'notebook-pen');if(assignment.difficulty)top.createSpan({text:tr('难度 {0}/5',[assignment.difficulty]),cls:'lh-assignment-difficulty'});const title=card.createEl('h3').createEl('button',{text:assignment.title,cls:'lh-homework-card-open'});title.onclick=open;
+        card.createDiv({text:[assignment.due?tr('截止 {0}',[assignment.due]):tr('无 DDL'),this.state.tasks.find(task=>task.assignmentId===assignment.id)?taskDurationLabel(this.state.tasks.find(task=>task.assignmentId===assignment.id)):assignment.estimatedMinutes?tr('AI 预计 {0} 分钟',[assignment.estimatedMinutes]):tr('分析后显示预计用时'),tr('{0} 个文件',[assignment.files?.length||0])].join(' · '),cls:'lh-homework-card-meta'});
+        const chips=card.createDiv({cls:'lh-assignment-topics'});for(const topic of assignment.topics||[])chips.createSpan({text:topic});const status=card.createDiv({cls:'lh-homework-analysis-status'});this.homeworkStatusEls.set(assignment.id,status);this.renderHomeworkStatus(status,{...assignment,course});const foot=card.createDiv({cls:'lh-homework-card-foot'});foot.createSpan({text:tr('{0} 项错题',[(assignment.wrongQuestionIds||[]).length])});const detail=foot.createEl('button',{text:tr('查看作业 →'),cls:'lh-text-link'});detail.onclick=open;
       }
     }
-    await this.renderLabSection(el,course);
+  }
+  async renderHomeworkDetail(el,course,id){
+    el.empty();el.addClass('learning-hub','lh-homework-detail');const store=await this.readAssignments(course);await this.syncCourseHomeworkTodos(course,store);const assignment=store.assignments.find(a=>a.id===id);
+    const back=el.createEl('button',{text:tr('← 返回作业列表'),cls:'lh-text-link lh-homework-back'});back.onclick=()=>this.openHub('assignments',course);
+    if(!assignment){this.header(el,tr('作业详情'),tr('作业已不存在'),tr('返回列表选择其他作业。'));return;}
+    const analysis=await this.readHomeworkAnalysis(course,id),linked=this.state.tasks.find(t=>t.assignmentId===id||t.id===assignment.taskId);
+    this.header(el,tr('{0} / HOMEWORK',[course.split(' - ')[0]]),assignment.title,tr('可以标记整道题，也可以只标记某个小问；共用题设会保留在错题记录中。'));
+    const facts=el.createDiv({cls:'lh-homework-facts'});for(const [label,value] of [[tr('截止日期'),assignment.due||tr('未设置 DDL')],[tr('预计用时'),linked?.estimatedMinutes?tr('预计 {0} 分钟',[linked.estimatedMinutes]):assignment.estimatedMinutes?tr('AI 预计 {0} 分钟',[assignment.estimatedMinutes]):tr('分析后显示')],[tr('题目'),tr('{0} 道大题 · {1} 个小问',[analysis?.questions?.length||0,(analysis?.questions||[]).reduce((n,q)=>n+(q.subquestions?.length||0),0)])],[tr('已选错题'),tr('{0} 项错题',[(assignment.wrongQuestionIds||[]).length])]]){const fact=facts.createDiv({cls:'lh-panel lh-homework-fact'});fact.createSpan({text:label});fact.createEl('strong',{text:value});}
+    const controls=el.createDiv({cls:'lh-assignment-toolbar'});const edit=controls.createEl('button',{text:tr('编辑信息'),cls:'lh-secondary'});edit.onclick=()=>this.editHomework(course,assignment);const reanalyze=controls.createEl('button',{text:tr('重新分析'),cls:'lh-secondary'});reanalyze.disabled=!!this.homeworkRunning?.has(id);reanalyze.onclick=()=>void this.analyzeHomework(course,id).catch(error=>new Notice(error.message));if(linked){const task=controls.createEl('button',{text:tr('记录作业状态'),cls:'lh-secondary'});task.onclick=()=>this.recordOutcome(linked,'task');}const archive=controls.createEl('button',{text:assignment.archivedAt?tr('移出归档'):tr('归档'),cls:'lh-secondary'});archive.onclick=()=>this.toggleHomeworkArchive(course,id);const remove=controls.createEl('button',{text:tr('删除作业'),cls:'lh-secondary'});remove.onclick=()=>new ConfirmModal(this.app,tr('删除这份作业？'),tr('《{0}》的原文件会移入 Obsidian 回收站，整理结果转入隐藏的恢复目录，关联待办和未完成的日程安排也会移除，已标记的错题记录也会移除。',[assignment.title]),tr('确认删除'),async()=>{await this.deleteHomework(course,id);await this.openHub('assignments',course);}).open();
+    const files=el.createDiv({cls:'lh-panel lh-homework-detail-files'});files.createEl('h2',{text:tr('原始文件')});for(const file of assignment.files||[]){const link=files.createEl('button',{text:file.name,cls:'lh-assignment-file'});link.onclick=()=>this.open(file.path);}if(assignment.importStatus==='partial')files.createDiv({text:tr('部分文件导入失败：{0}',[(assignment.failedFiles||[]).join('、')]),cls:'lh-assignment-warning'});
+    const status=el.createDiv({cls:'lh-panel lh-homework-detail-status'});this.homeworkStatusEls||=new Map();this.homeworkStatusEls.set(id,status);this.renderHomeworkStatus(status,{...assignment,course});
+    if(assignment.estimateReason)status.createDiv({text:assignment.estimateReason,cls:'lh-homework-estimate-reason'});
+    if(assignment.analysisStatus==='complete'&&analysis?.questions?.length){const questions=el.createDiv({cls:'lh-homework-detail-questions'});await this.renderHomeworkQuestionList(questions,course,assignment,analysis.questions);}
+    else if(assignment.analysisStatus==='complete')el.createDiv({text:tr('整理结果暂不可用，请重新分析。'),cls:'lh-assignment-warning'});
   }
   async renderCourse(el,ctx){
     el.empty();el.addClass('learning-hub','lh-course-overview');
@@ -2142,8 +2325,6 @@ module.exports=class LearningHub extends Plugin {
     heading.createDiv({text:tr("LECTURE SPACE / {0}", [short]),cls:'lh-eyebrow'});
     heading.createEl('h1',{text:course.slice(short.length+3)});
     heading.createEl('p',{text:tr("{0} 讲纳入学习范围 · 共 {1} 讲", [s.scoped.length, s.all.length])});
-    const headingActions=heading.createDiv({cls:'lh-course-heading-actions'});
-    const newLesson=headingActions.createEl('button',{text:tr("＋ 上传新讲课件"),cls:'lh-primary'});newLesson.onclick=()=>this.createLessonFromSlides(course);
     const metrics=heading.createDiv({cls:'lh-course-statline'});
     for(const [key,name] of STAGES){const metric=metrics.createDiv({cls:'lh-course-stat'});metric.createEl('strong',{text:s.scoped.length?String(s.pending[key]):'—'});metric.createSpan({text:tr(name)});}
     const workspace=el.createDiv({cls:'lh-course-workspace'});
@@ -2155,12 +2336,9 @@ module.exports=class LearningHub extends Plugin {
       title.createDiv({text:tr("当前讲次"),cls:'lh-eyebrow'});
       title.createEl('h2',{text:flow.lessonTitle?`${selected.basename.split('@')[0].trim()} · ${flow.lessonTitle}`:selected.basename});
       title.createSpan({text:inScope?tr("已纳入学习范围"):tr("未纳入学习范围"),cls:'lh-lesson-subtitle'});
-      const legacyDescription=(Array.isArray(flow.preview.summary)?flow.preview.summary:[]).slice(0,2).map(item=>String(item||'').replace(/\*\*(.*?)\*\*/g,'$1').replace(/`([^`]+)`/g,'$1').replace(/\$([^$]+)\$/g,'$1')).join(' ');
-      const description=String(flow.preview.description||legacyDescription).trim();
-      title.createEl('p',{text:description||tr("上传课件并完成 Codex 分析后，这里会显示本讲简介。"),cls:`lh-lesson-description${description?'':' is-pending'}`});
       const steps=main.createDiv({cls:'lh-learning-steps'});
       const journey=[
-        {name:tr("预习"),state:current.previewed?tr("已确认"):tr("待完成"),done:current.previewed,action:()=>this.showWorkflow('preview',course,selected.path)},
+        {name:tr("预习"),state:current.previewed?tr("已确认"):tr("待完成"),duration:this.previewEstimatedMinutes(flow),done:current.previewed,action:()=>this.showWorkflow('preview',course,selected.path)},
         {name:tr("课堂学习"),state:flow.milestones.learnedAt?tr("已确认"):current.learned?tr("确认日期"):tr("待确认"),done:!!flow.milestones.learnedAt,action:()=>this.confirmLearning(selected)},
         {name:tr("间隔复习"),state:plan.filter(r=>r.completedAt).length+tr("/3 轮"),done:plan.every(r=>r.completedAt),action:()=>this.showWorkflow('review',course,selected.path,Math.max(1,plan.find(r=>r.unlocked&&!r.completedAt)?.round||plan.find(r=>!r.completedAt)?.round||3))}
       ];
@@ -2170,6 +2348,7 @@ module.exports=class LearningHub extends Plugin {
         step.createSpan({text:stage.done?'✓':String(index+1).padStart(2,'0'),cls:'lh-step-index'});
         step.createSpan({text:stage.name,cls:'lh-step-name'});
         step.createSpan({text:stage.state,cls:'lh-step-state'});
+        if(stage.duration)step.createSpan({text:tr("预计 {0} 分钟",[stage.duration]),cls:'lh-step-duration'});
         step.onclick=stage.action;
       });
       const actions=main.createDiv({cls:'lh-learning-actions'});
@@ -2183,7 +2362,8 @@ module.exports=class LearningHub extends Plugin {
       };
       action(tr("双窗格预习"),tr("课件与交互式预习并排"),'columns-2',()=>this.showWorkflow('preview',course,selected.path),true);
       action(tr("主笔记"),tr("打开本讲知识笔记"),'file-text',()=>this.open(selected.path));
-      action(tr("引导式回忆"),tr("先作答，再揭示与自评"),'brain',()=>this.showWorkflow('recall',course,selected.path));
+      const recallMinutes=this.recallEstimatedMinutes(flow);
+      action(tr("引导式回忆"),`${tr("先作答，再揭示与自评")}${recallMinutes?` · ${tr("预计 {0} 分钟",[recallMinutes])}`:''}`,'brain',()=>this.showWorkflow('recall',course,selected.path));
       const review=main.createDiv({cls:'lh-review-strip'});
       const reviewHead=review.createDiv({cls:'lh-review-strip-head'});reviewHead.createEl('h3',{text:tr("间隔复习")});reviewHead.createSpan({text:tr("三轮递进 · 按日期解锁")});
       const reviewCards=review.createDiv({cls:'lh-review-rounds'});
@@ -2191,8 +2371,12 @@ module.exports=class LearningHub extends Plugin {
         const card=reviewCards.createEl('button',{cls:`lh-review-round${round.completedAt?' is-done':round.unlocked?' is-ready':' is-locked'}`});
         card.createSpan({text:tr(round.title),cls:'lh-review-round-title'});
         card.createSpan({text:round.completedAt?tr("已完成"):round.unlocked?tr("现在可以复习"):round.due?tr("预计 {0} 解锁", [round.due]):tr("学习完成后排期"),cls:'lh-review-round-status'});
+        const duration=this.reviewEstimatedMinutes(flow,round.round);
+        if(duration)card.createSpan({text:tr("预计 {0} 分钟",[duration]),cls:'lh-review-round-duration'});
         card.onclick=()=>this.showWorkflow('review',course,selected.path,round.round);
       }
+      const guideSection=main.createDiv({cls:'lh-lesson-guide-section'});
+      await this.renderLessonGuide(guideSection,selected,flow);
       const resources=main.createDiv({cls:'lh-lesson-resources'});
       const resourceHead=resources.createDiv({cls:'lh-lesson-section-head'});resourceHead.createEl('h3',{text:tr("本讲课件")});
       const upload=resourceHead.createEl('button',{text:tr("＋ 上传课件"),cls:'lh-inline-action'});upload.onclick=()=>this.upload(selected);
@@ -2212,12 +2396,31 @@ module.exports=class LearningHub extends Plugin {
     const overview=links.createEl('button',{text:tr("返回课程概览"),cls:'lh-aside-link'});overview.onclick=()=>this.openHub('course',course);
     const syllabus=this.syllabus(course);
     if(syllabus)this.navText(links,tr("原有 Syllabus 笔记"),syllabus.path,'lh-aside-link');
-    const assignmentLink=links.createEl('button',{text:tr("作业与 Lab Session"),cls:'lh-aside-link'});assignmentLink.onclick=()=>this.openHub('assignments',course);
+    const assignmentLink=links.createEl('button',{text:tr("作业与练习"),cls:'lh-aside-link'});assignmentLink.onclick=()=>this.openHub('assignments',course);
     this.navText(links,tr("原有课程目录"),`${ROOT}/${course}/${course}.md`,'lh-aside-link');
     const scopeSection=aside.createDiv({cls:'lh-aside-section'});scopeSection.createEl('h3',{text:tr("学习范围")});
     const facts=scopeSection.createDiv({cls:'lh-aside-facts'});
     [[tr("讲次总数"),s.all.length],[tr("已纳入"),s.scoped.length],[tr("待复习"),s.pending.reviewed]].forEach(([name,value])=>{const row=facts.createDiv();row.createSpan({text:name});row.createEl('strong',{text:String(value)});});
     el.createDiv({text:tr("学习范围暂按讲次日期推定；三轮复习会在确认课堂学习和完成回忆后依次开放。"),cls:'lh-course-footnote'});
+  }
+  async renderLessonGuide(host,file,flow){
+    const preview=flow.preview||{},guide=displayLessonGuide(preview),analysis=this.analysisByLesson?.get(file.path),root=host.createDiv({cls:'lh-lesson-guide'}),pending=[];
+    const head=root.createDiv({cls:'lh-guide-heading'});head.createEl('h3',{text:tr('本讲导览')});
+    const action=head.createEl('button',{text:analysis?tr('正在生成…'):guide.rich?tr('更新导览'):tr('生成完整导览'),cls:'lh-inline-action'});action.disabled=!!analysis||!this.pdfs(file).length;
+    action.onclick=async()=>{action.disabled=true;try{await this.generatePreviewDraft(file,{guideOnly:true});}catch(error){new Notice(error.message,7000);}finally{action.disabled=false;}};
+    if(analysis)this.renderPreviewAnalysis(root,analysis);
+    else if(this.previewErrors?.has(file.path))root.createDiv({text:this.previewErrors.get(file.path),cls:'lh-draft-conflict'});
+    const prose=(parent,text,cls='')=>{const el=parent.createDiv({cls:`markdown-rendered lh-guide-markdown ${cls}`});pending.push(this.renderPreviewMarkdown(el,text,file));};
+    const description=String(preview.description||guide.learningGoals.slice(0,2).join(' ')).trim();
+    if(description)prose(root,description,'lh-guide-description');
+    else root.createEl('p',{text:tr('上传课件后，可生成核心主题、学习目标、知识联系与理解提醒。'),cls:'lh-flow-muted'});
+    if(!guide.rich&&(guide.topics.length||guide.learningGoals.length))root.createSpan({text:tr('基于已有预习内容'),cls:'lh-guide-legacy-label'});
+    if(guide.topics.length){const section=root.createDiv({cls:'lh-guide-section'}),heading=section.createDiv({cls:'lh-guide-section-head'});heading.createEl('h4',{text:tr('核心内容')});heading.createSpan({text:tr('{0} 个主题',[guide.topics.length])});const grid=section.createDiv({cls:'lh-guide-topics'});guide.topics.forEach((topic,index)=>{const card=grid.createDiv({cls:'lh-guide-topic'});card.createSpan({text:String(index+1).padStart(2,'0'),cls:'lh-guide-topic-index'});const content=card.createDiv({cls:'lh-guide-topic-copy'});prose(content,topic.title,'lh-guide-topic-title');prose(content,topic.explanation);});}
+    if(guide.connections.length){const section=root.createDiv({cls:'lh-guide-section lh-guide-connections'});section.createEl('h4',{text:tr('知识主线')});for(const [index,text] of guide.connections.entries()){const row=section.createDiv({cls:'lh-guide-connection'});row.createSpan({text:String(index+1).padStart(2,'0')});prose(row,text);}}
+    const columns=root.createDiv({cls:'lh-guide-columns'});
+    const list=(label,items,cls)=>{if(!items.length)return;const section=columns.createDiv({cls:`lh-guide-section ${cls}`});section.createEl('h4',{text:label});const ul=section.createEl('ul');for(const text of items)prose(ul.createEl('li'),text);};
+    list(guide.rich?tr('学完应能做到'):tr('预习路线'),guide.learningGoals,'lh-guide-goals');list(guide.rich?tr('理解时留意'):tr('已记录的疑问'),guide.focusPoints,'lh-guide-focus');
+    await Promise.all(pending);
   }
   pdfs(lesson){const folder=lesson.parent?.path;return this.app.vault.getFiles().filter(f=>f.parent?.path===folder&&f.extension.toLowerCase()==='pdf').sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));}
   async importLessonFiles(folder,files){
@@ -2319,7 +2522,7 @@ module.exports=class LearningHub extends Plugin {
     return bar;
   }
   async renderWorkflow(el,ctx){
-    el.empty();el.addClass('learning-hub','lh-workflow');
+    el.empty();el.addClass('learning-hub','lh-workflow');el.classList.toggle('lh-question-workspace',['recall','review'].includes(ctx.page));
     const file=asFile(this.app,ctx.lessonPath);
     if(!file){el.createDiv({text:tr("讲次笔记不存在。"),cls:'lh-empty'});return;}
     const flow=await this.readFlow(file),title=ctx.page==='preview'?tr("课前预习"):ctx.page==='recall'?tr("引导式回忆"):tr("第 {0} 轮复习", [ctx.round]);
@@ -2328,6 +2531,7 @@ module.exports=class LearningHub extends Plugin {
     head.createDiv({text:`${ctx.course?.split(' - ')[0]||''}  /  ${file.basename}${flow.lessonTitle?` · ${flow.lessonTitle}`:''}`,cls:'lh-eyebrow'});
     head.createEl('h1',{text:title});
     head.createEl('p',{text:ctx.page==='preview'?tr("左侧查看 PDF，右侧逐项确认理解；过程仅保存在隐藏 JSON 中。"):ctx.page==='recall'?tr("先写出自己的答案，再揭示参考内容并自评。"):tr("复习题先作答后揭示；本轮结果会用于后续复习与错误记录。")});
+    if(['recall','review'].includes(ctx.page))await this.renderPracticeReviewLinks(el,ctx.course,file.path);
     if(ctx.page==='preview'){this.renderPreviewSources(el,file,ctx.course);await this.renderPreview(el,file,flow,ctx.course);}
     if(ctx.page==='recall')this.renderQuestionSession(el,file,flow,'recall',0,ctx.course);
     if(ctx.page==='review')await this.renderReview(el,file,flow,ctx.round,ctx.course);
@@ -2371,10 +2575,10 @@ module.exports=class LearningHub extends Plugin {
       queued:tr("已读取 {0}，等待 Codex 任务开始…", [pages]),
       connecting:tr("已读取 {0}，正在连接 Codex…", [pages]),
       starting:tr("已读取 {0}，正在提交生成任务…", [pages]),
-      generating:tr("Codex 正在整理知识点、导图和分层知识块…"),
+      generating:analysis.guideOnly?tr("Codex 正在整理核心主题、学习目标和知识联系…"):tr("Codex 正在整理知识点、导图和分层知识块…"),
       thinking:tr("Codex 正在分析课件；思考摘要持续更新…"),
       receiving:tr("Codex 正在返回生成结果…"),
-      saving:tr("正在校验并保存预习内容…"),
+      saving:analysis.guideOnly?tr("正在校验并保存讲次导览…"):tr("正在校验并保存预习内容…"),
     };
     analysis.statusEl?.setText(stages[analysis.phase]||stages.generating);
     const step=analysis.phase==='extract'?0:analysis.phase==='saving'?2:1;
@@ -2387,7 +2591,7 @@ module.exports=class LearningHub extends Plugin {
     const amount=analysis.receivedChars?tr(" · 已接收 {0} 字符", [analysis.receivedChars.toLocaleString()]):
       analysis.inputChars?tr(" · 已送入 {0} 字符", [analysis.inputChars.toLocaleString()]):'';
     analysis.elapsedEl?.setText(tr("已用时 {0}{1} · {2} / {3}", [duration, amount, analysis.model, analysis.effort]));
-    analysis.usageEl?.setText(analysis.tokenUsage?formatCodexUsage(analysis.tokenUsage):'');
+    renderTokenUsage(analysis.usageEl,analysis.tokenUsage);
   }
   updateNoteProgress(analysis){
     if(!analysis)return;
@@ -2399,7 +2603,7 @@ module.exports=class LearningHub extends Plugin {
     const seconds=Math.floor((Date.now()-analysis.startedAt)/1000),duration=`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;
     const amount=analysis.receivedChars?tr(" · 已接收 {0} 字符", [analysis.receivedChars.toLocaleString()]):analysis.inputChars?tr(" · 已送入 {0} 字符", [analysis.inputChars.toLocaleString()]):'';
     analysis.elapsedEl?.setText(tr("已用时 {0}{1} · {2} / {3}", [duration, amount, analysis.model, analysis.effort]));
-    analysis.usageEl?.setText(analysis.tokenUsage?formatCodexUsage(analysis.tokenUsage):'');
+    renderTokenUsage(analysis.usageEl,analysis.tokenUsage);
   }
   renderNoteReasoning(analysis){
     if(!analysis)return;
@@ -2420,25 +2624,22 @@ module.exports=class LearningHub extends Plugin {
     const progress=host.createDiv({cls:'lh-preview-generating lh-note-generating',attr:{role:'status','aria-live':'polite'}});
     progress.createSpan({cls:'lh-analysis-spinner'});progress.createDiv({text:tr("正在整理主笔记草案"),cls:'lh-preview-generating-title'});
     const steps=progress.createDiv({cls:'lh-preview-progress-steps'});analysis.stepEls=[tr("读取课件"),tr("AI 整理"),tr("保存草案")].map(label=>steps.createSpan({text:label}));
-    analysis.statusEl=progress.createEl('p',{cls:'lh-preview-stage'});analysis.elapsedEl=progress.createEl('p',{cls:'lh-preview-elapsed'});analysis.usageEl=progress.createEl('p',{cls:'lh-preview-usage'});
+    analysis.statusEl=progress.createEl('p',{cls:'lh-preview-stage'});analysis.elapsedEl=progress.createEl('p',{cls:'lh-preview-elapsed'});analysis.usageEl=progress.createDiv({cls:'lh-preview-usage'});
     const reasoning=progress.createDiv({cls:'lh-preview-reasoning'}),head=reasoning.createDiv({cls:'lh-preview-reasoning-head'});
     head.createDiv({text:tr("思考摘要"),cls:'lh-preview-reasoning-label'});const thinking=head.createDiv({cls:'lh-preview-thinking',attr:{'aria-label':tr("正在思考")}});thinking.createSpan({text:tr("思考中")});
     const dots=thinking.createSpan({cls:'lh-preview-thinking-dots',attr:{'aria-hidden':'true'}});for(let index=0;index<3;index++)dots.createSpan({cls:'lh-preview-thinking-dot'});
     analysis.reasoningEl=reasoning.createDiv({cls:'lh-preview-reasoning-text lh-preview-markdown'});
     this.updateNoteProgress(analysis);this.renderNoteReasoning(analysis);
   }
-  async renderPreview(el,file,flow,course){
-    const body=el.createDiv({cls:'lh-flow-body lh-preview-layout'}),main=body.createDiv({cls:'lh-flow-main'});
-    const analysis=this.analysisByLesson?.get(file.path),hasContent=!!flow.preview.concepts.length;
-    if(analysis){
-      const progress=main.createDiv({cls:'lh-preview-generating',attr:{role:'status','aria-live':'polite'}});
+  renderPreviewAnalysis(host,analysis){
+      const progress=host.createDiv({cls:'lh-preview-generating',attr:{role:'status','aria-live':'polite'}});
       progress.createSpan({cls:'lh-analysis-spinner'});
-      progress.createDiv({text:tr("正在生成这讲的预习内容"),cls:'lh-preview-generating-title'});
+      progress.createDiv({text:analysis.guideOnly?tr("正在更新本讲导览"):tr("正在生成这讲的预习内容"),cls:'lh-preview-generating-title'});
       const steps=progress.createDiv({cls:'lh-preview-progress-steps'});
       analysis.stepEls=[tr("读取课件"),tr("AI 生成"),tr("保存结果")].map(label=>steps.createSpan({text:label}));
       analysis.statusEl=progress.createEl('p',{cls:'lh-preview-stage'});
       analysis.elapsedEl=progress.createEl('p',{cls:'lh-preview-elapsed'});
-      analysis.usageEl=progress.createEl('p',{cls:'lh-preview-usage'});
+      analysis.usageEl=progress.createDiv({cls:'lh-preview-usage'});
       const reasoning=progress.createDiv({cls:'lh-preview-reasoning'});
       const reasoningHead=reasoning.createDiv({cls:'lh-preview-reasoning-head'});
       reasoningHead.createDiv({text:tr("思考摘要"),cls:'lh-preview-reasoning-label'});
@@ -2450,8 +2651,11 @@ module.exports=class LearningHub extends Plugin {
       this.updatePreviewProgress(analysis);
       this.renderPreviewReasoning(analysis);
       const skeleton=progress.createDiv({cls:'lh-preview-skeleton'});for(let i=0;i<4;i++)skeleton.createSpan();
-      return;
-    }
+  }
+  async renderPreview(el,file,flow,course){
+    const body=el.createDiv({cls:'lh-flow-body lh-preview-layout'}),main=body.createDiv({cls:'lh-flow-main'});
+    const analysis=this.analysisByLesson?.get(file.path),hasContent=!!flow.preview.concepts.length;
+    if(analysis){this.renderPreviewAnalysis(main,analysis);return;}
     if(!hasContent){
       const empty=main.createDiv({cls:'lh-preview-empty'});
       empty.createDiv({text:tr("预习内容还没有生成"),cls:'lh-preview-empty-title'});
@@ -2462,6 +2666,7 @@ module.exports=class LearningHub extends Plugin {
     const groups=previewGroups(flow.preview.concepts),pending=[],nodes=new Map();
     const intro=main.createDiv({cls:'lh-flow-panel lh-preview-summary'});
     const introHead=intro.createDiv({cls:'lh-flow-section-head'});introHead.createEl('h2',{text:tr("快速看懂这一讲")});
+    const previewMinutes=this.previewEstimatedMinutes(flow);if(previewMinutes)introHead.createSpan({text:tr("预计 {0} 分钟",[previewMinutes]),cls:'lh-preview-estimate'});
     const regenerate=introHead.createEl('button',{text:tr("重新分析课件"),cls:'lh-inline-action'});
     regenerate.onclick=async()=>{regenerate.disabled=true;try{await this.generatePreviewDraft(file);}catch(error){new Notice(error.message,7000);}finally{regenerate.disabled=false;}};
     const summary=Array.isArray(flow.preview.summary)&&flow.preview.summary.length?flow.preview.summary:String(flow.preview.objectives||'').split(/\n+/).filter(Boolean);
@@ -2475,7 +2680,7 @@ module.exports=class LearningHub extends Plugin {
     const section=main.createDiv({cls:'lh-flow-panel lh-preview-blocks'}),heading=section.createDiv({cls:'lh-flow-section-head'});
     heading.createEl('h2',{text:tr("分层知识块")});const controls=heading.createDiv({cls:'lh-preview-block-controls'});const progress=controls.createSpan({cls:'lh-preview-count'});
     const add=controls.createEl('button',{text:tr("＋ 补充"),cls:'lh-inline-action'});
-    add.onclick=()=>new EntryModal(this.app,tr("补充知识块"),[{key:'group',label:tr("所属主题"),value:groups[0]?.title||tr('本讲要点')},{key:'title',label:tr("知识点名称")},{key:'summary',label:tr("解释（支持 Markdown）"),multiline:true}],async value=>{flow.preview.concepts.push({id:crypto.randomUUID(),group:value.group||tr("本讲要点"),title:value.title,summary:value.summary,status:null,note:''});await this.saveFlow(file,flow);await this.rerenderLesson(file);}).open();
+    add.onclick=()=>new EntryModal(this.app,tr("补充知识块"),[{key:'group',label:tr("所属主题"),value:groups[0]?.title||tr('本讲要点')},{key:'title',label:tr("知识点名称")},{key:'summary',label:tr("解释（支持 Markdown）"),multiline:true}],async value=>{flow.preview.concepts.push({id:crypto.randomUUID(),group:value.group||tr("本讲要点"),title:value.title,summary:value.summary,status:null,note:''});await this.saveFlow(file,flow);await this.updateRollingSchedule().catch(error=>console.warn('Learning Hub preview replan:',error));await this.rerenderLesson(file);}).open();
     const updateProgress=()=>progress.setText(tr("{0} / {1} 已检查", [flow.preview.concepts.filter(item=>item.status).length, flow.preview.concepts.length]));
     updateProgress();
     for(const group of groups){
@@ -2547,48 +2752,55 @@ module.exports=class LearningHub extends Plugin {
   }
   renderQuestionSession(el,file,flow,mode,round,course){
     const record=mode==='recall'?flow.recall:flow.reviews.rounds[round-1],questions=this.sessionQuestions(flow,mode,round);
+    el.addClass('lh-question-workspace');
     const panel=el.createDiv({cls:'lh-flow-panel lh-question-panel'});
     const head=panel.createDiv({cls:'lh-flow-section-head'});head.createEl('h2',{text:mode==='recall'?tr("引导问题"):round===1?tr("核心提取与薄弱点"):round===2?tr("方法选择与应用"):tr("跨讲次混合练习")});
-    const ai=head.createEl('button',{text:tr("AI 生成问题草案"),cls:'lh-inline-action'});
+    const key=this.questionSessionKey(file,mode,round),analysis=this.questionAnalysisBySession?.get(key);
+    const ai=head.createEl('button',{text:analysis?tr('正在生成问题…'):tr("AI 生成问题草案"),cls:`lh-inline-action lh-question-ai${analysis?' is-busy':''}`});ai.disabled=!!analysis;if(analysis)ai.createSpan({cls:'lh-analysis-spinner',attr:{'aria-hidden':'true'}});
     ai.onclick=async()=>{ai.disabled=true;ai.setText(tr("正在生成问题…"));try{await this.generateQuestionDraft(course,file,mode,round);}catch(error){console.error('Learning Hub question AI:',error);new Notice(error.message);}finally{ai.disabled=false;ai.setText(tr("AI 生成问题草案"));}};
-    const add=head.createEl('button',{text:tr("＋ 添加问题"),cls:'lh-inline-action'});
-    add.onclick=()=>new EntryModal(this.app,tr("添加复习问题"),[{key:'title',label:tr("问题"),multiline:true},{key:'answer',label:tr("参考答案（可稍后补充）"),multiline:true},{key:'source',label:tr("对应讲次（可选）"),placeholder:tr("当前讲次或其他讲次路径")}],async value=>{record.questions.push({id:crypto.randomUUID(),prompt:value.title,answer:value.answer,sourceLessonPath:value.source||file.path});await this.saveFlow(file,flow);await this.rerenderLesson(file);}).open();
+    const add=head.createEl('button',{text:tr("＋ 添加问题"),cls:'lh-inline-action'});add.disabled=!!analysis;
+    const assessed=questions.filter(question=>record.attempts.some(attempt=>attempt.questionId===question.id)).length;
+    if(questions.length){const summary=panel.createDiv({cls:'lh-question-session-summary'});summary.createSpan({text:tr('先作答 → 查看参考 → 自评')});summary.createSpan({text:tr('已自评 {0} / {1} 题',[assessed,questions.length])});summary.createEl('progress',{attr:{value:String(assessed),max:String(questions.length),'aria-label':tr('自评进度')}});}
+    if(analysis)this.renderQuestionGenerationProgress(panel,analysis);else if(this.questionErrorsBySession?.has(key))panel.createDiv({text:tr('问题生成失败：{0}',[this.questionErrorsBySession.get(key)]),cls:'lh-note-generation-error'});
+    add.onclick=()=>new EntryModal(this.app,tr("添加复习问题"),[{key:'title',label:tr("问题"),multiline:true},{key:'answer',label:tr("参考答案（可稍后补充）"),multiline:true},{key:'source',label:tr("对应讲次（可选）"),placeholder:tr("当前讲次或其他讲次路径")}],async value=>{record.questions.push({id:crypto.randomUUID(),prompt:value.title,answer:value.answer,sourceLessonPath:value.source||file.path});await this.saveFlow(file,flow);await this.updateRollingSchedule().catch(error=>console.warn('Learning Hub review replan:',error));await this.rerenderLesson(file);}).open();
     if(record.questionDraft){
       const draft=panel.createDiv({cls:'lh-ai-draft lh-question-draft'});
-      draft.createEl('h3',{text:tr("待确认的 AI 问题 · {0} 道", [record.questionDraft.questions.length])});
+      const draftDuration=Number(record.questionDraft.estimatedMinutes)>0?` · ${tr("预计 {0} 分钟",[record.questionDraft.estimatedMinutes])}`:'';
+      draft.createEl('h3',{text:`${tr("待确认的 AI 问题 · {0} 道", [record.questionDraft.questions.length])}${draftDuration}`});
       for(const q of record.questionDraft.questions){const row=draft.createDiv({cls:'lh-question-draft-item'});row.createEl('strong',{text:q.prompt});row.createEl('p',{text:tr("参考：{0}", [q.answer])});}
       const actions=draft.createDiv({cls:'lh-confirm-actions'});
-      const apply=actions.createEl('button',{text:tr("采用这些问题"),cls:'lh-primary'});
-      apply.onclick=()=>new ConfirmModal(this.app,tr("采用 AI 问题"),tr("将这些问题加入当前回忆或复习；作答前参考答案仍会隐藏。"),tr("确认采用"),async()=>{const fresh=await this.readFlow(file);const target=mode==='recall'?fresh.recall:fresh.reviews.rounds[round-1];for(const q of target.questionDraft.questions)target.questions.push({id:crypto.randomUUID(),...q,sourceLessonPath:file.path,sourceAssignmentId:target.questionDraft.assignment?.id||null,sourceAssignmentTitle:target.questionDraft.assignment?.title||'',sourceFilePaths:target.questionDraft.assignment?.files?.map(f=>f.path)||[],generatedBy:'codex',createdAt:now()});delete target.questionDraft;await this.saveFlow(file,fresh);await this.rerenderLesson(file);}).open();
-      const discard=actions.createEl('button',{text:tr("舍弃草案")});discard.onclick=async()=>{delete record.questionDraft;await this.saveFlow(file,flow);await this.rerenderLesson(file);};
+      const apply=actions.createEl('button',{text:tr("采用这些问题"),cls:'lh-primary'});apply.disabled=!!analysis;
+      apply.onclick=()=>new ConfirmModal(this.app,tr("采用 AI 问题"),tr("将这些问题加入当前回忆或复习；作答前参考答案仍会隐藏。"),tr("确认采用"),async()=>{const fresh=await this.readFlow(file);const target=mode==='recall'?fresh.recall:fresh.reviews.rounds[round-1],questionDraft=target.questionDraft;for(const q of questionDraft.questions)target.questions.push({id:crypto.randomUUID(),...q,sourceLessonPath:file.path,sourceAssignmentId:questionDraft.assignment?.id||null,sourceAssignmentTitle:questionDraft.assignment?.title||'',sourceFilePaths:questionDraft.assignment?.files?.map(f=>f.path)||[],practiceReferences:questionDraft.practiceReferences||[],generatedBy:'codex',createdAt:now()});if(Number(questionDraft.estimatedMinutes)>0){target.estimatedMinutes=questionDraft.estimatedMinutes;target.estimatedQuestionCount=questionDraft.estimatedQuestionCount||(mode==='recall'?target.questions.length:this.sessionQuestions(fresh,'review',round).length);}delete target.questionDraft;await this.saveFlow(file,fresh);await this.updateRollingSchedule().catch(error=>console.warn('Learning Hub lecture replan:',error));await this.rerenderLesson(file);}).open();
+      const discard=actions.createEl('button',{text:tr("舍弃草案")});discard.disabled=!!analysis;discard.onclick=async()=>{delete record.questionDraft;await this.saveFlow(file,flow);await this.rerenderLesson(file);};
     }
-    if(!questions.length)panel.createDiv({text:tr("还没有问题。可以让 AI 生成草案，或手动添加。"),cls:'lh-flow-empty'});
+    if(!questions.length&&!analysis)panel.createDiv({text:tr("还没有问题。可以让 AI 生成草案，或手动添加。"),cls:'lh-flow-empty'});
     record.drafts=record.drafts||{};
     for(const [index,question] of questions.entries()){
-      const card=panel.createDiv({cls:'lh-question'});card.createDiv({text:tr("QUESTION {0}", [String(index+1).padStart(2,'0')]),cls:'lh-eyebrow'});card.createEl('h3',{text:question.prompt});
-      if(question.sourceAssignmentId){const source=card.createDiv({cls:'lh-question-source'});source.createSpan({text:tr("参考作业 · {0} · {1}", [question.sourceAssignmentTitle||tr("作业"), question.topic||tr("知识点")])});for(const path of question.sourceFilePaths||[]){const file=source.createEl('button',{text:path.split('/').at(-1)});file.onclick=()=>this.open(path);}}
       const latest=record.attempts.filter(a=>a.questionId===question.id).at(-1),draft=record.drafts[question.id]||{};
+      const card=panel.createDiv({cls:`lh-question${latest?' is-assessed':draft.revealedAt?' is-revealed':''}`}),heading=card.createDiv({cls:'lh-question-heading'});heading.createSpan({text:tr("QUESTION {0}",[String(index+1).padStart(2,'0')]),cls:'lh-eyebrow'});if(!latest)heading.createSpan({text:draft.revealedAt?tr('待自评'):tr('待作答'),cls:'lh-question-stage'});card.createEl('h3',{text:question.prompt});
+      if(question.practiceReferences?.length){const refs=card.createDiv({cls:'lh-question-source'});for(const ref of question.practiceReferences)refs.createEl('button',{text:ref.title}).onclick=()=>this.openHub('practice',course,undefined,null,0,ref.id);}
+      if(question.sourceAssignmentId){const source=card.createDiv({cls:'lh-question-source'});source.createSpan({text:tr("参考作业 · {0} · {1}", [question.sourceAssignmentTitle||tr("作业"), question.topic||tr("知识点")])});for(const path of question.sourceFilePaths||[]){const file=source.createEl('button',{text:path.split('/').at(-1)});file.onclick=()=>this.open(path);}}
       if(latest){card.createDiv({text:tr("已记录 · {0}", [latest.rating==='know'?tr("会"):latest.rating==='unsure'?tr("不确定"):tr("不会")]),cls:`lh-question-result is-${latest.rating}`});continue;}
       const answer=this.workflowField(card,tr("先写下自己的答案"),draft.answer||'',async value=>{record.drafts[question.id]={...record.drafts[question.id],answer:value};await this.saveFlow(file,flow);},tr("先独立回忆，不要查看主笔记。"));
-      if(draft.revealedAt){answer.disabled=true;const reference=card.createDiv({cls:'lh-reference'});reference.createDiv({text:tr("参考内容"),cls:'lh-eyebrow'});reference.createEl('p',{text:question.answer||tr("参考答案尚未准备；先根据自己的理解自评，AI 内容接入后再补充。")});
-        const ratings=card.createDiv({cls:'lh-rating-actions'});
-        for(const [rating,label] of [['know',tr("会")],['unsure',tr("不确定")],['dont-know',tr("不会")]]){const button=ratings.createEl('button',{text:label,cls:'lh-choice'});button.onclick=async()=>{const attempt={questionId:question.id,answer:draft.answer||'',rating,at:now(),mode,round:round||null};record.attempts.push(attempt);delete record.drafts[question.id];await this.saveFlow(file,flow);if(rating!=='know')await this.logError(file,{questionId:question.id,prompt:question.prompt,answer:attempt.answer,reference:question.answer||'',rating,mode,round:round||null,sourceLessonPath:question.sourceLessonPath||file.path,sourceAssignmentId:question.sourceAssignmentId||null,sourceAssignmentTitle:question.sourceAssignmentTitle||'',topic:question.topic||''});await this.rerenderLesson(file);};}
+      if(draft.revealedAt){answer.disabled=true;const reference=card.createDiv({cls:'lh-reference'}),referenceHead=reference.createDiv({cls:'lh-question-reference-head'});setIcon(referenceHead.createSpan(),'book-open');referenceHead.createSpan({text:tr("参考内容")});reference.createEl('p',{text:question.answer||tr("参考答案尚未准备；先根据自己的理解自评，AI 内容接入后再补充。")});
+        const ratings=card.createDiv({cls:'lh-rating-actions'});ratings.createSpan({text:tr('你的掌握程度'),cls:'lh-question-rating-label'});
+        for(const [rating,label] of [['know',tr("会")],['unsure',tr("不确定")],['dont-know',tr("不会")]]){const button=ratings.createEl('button',{cls:`lh-choice lh-question-rating is-${rating}`});setIcon(button.createSpan(),rating==='know'?'circle-check':rating==='unsure'?'circle-help':'circle-x');button.createSpan({text:label});button.onclick=async()=>{const attempt={questionId:question.id,answer:draft.answer||'',rating,at:now(),mode,round:round||null};record.attempts.push(attempt);delete record.drafts[question.id];await this.saveFlow(file,flow);if(rating!=='know')await this.logError(file,{questionId:question.id,prompt:question.prompt,answer:attempt.answer,reference:question.answer||'',rating,mode,round:round||null,sourceLessonPath:question.sourceLessonPath||file.path,sourceAssignmentId:question.sourceAssignmentId||null,sourceAssignmentTitle:question.sourceAssignmentTitle||'',topic:question.topic||''});await this.rerenderLesson(file);};}
       }else{const reveal=card.createEl('button',{text:tr("我已作答 · 查看参考内容"),cls:'lh-secondary'});reveal.onclick=async()=>{const value=answer.value.trim();if(!value){new Notice(tr("请先写下自己的答案"));return;}record.drafts[question.id]={answer:value,revealedAt:now()};await this.saveFlow(file,flow);await this.rerenderLesson(file);};}
     }
     const celebration=this.celebrateFlow?.path===file.path&&this.celebrateFlow.mode===mode&&this.celebrateFlow.round===round&&this.celebrateFlow.until>Date.now();
     const finish=el.createDiv({cls:`lh-flow-finish${celebration?' is-celebrating':''}`});
     const completed=!!record.completedAt;finish.createEl('strong',{text:completed?tr("本轮已完成"):mode==='recall'?tr("完成引导式回忆"):tr("完成第 {0} 轮复习", [round])});
     finish.createEl('p',{text:completed?tr("结果已保存在隐藏 JSON 中。"):tr("所有题目都完成自评后，才可以确认结束。")});
-    const done=finish.createEl('button',{text:completed?tr("已完成"):tr("确认本轮完成"),cls:'lh-primary'});done.disabled=completed;
-    done.onclick=()=>{if(!questions.length||questions.some(q=>!record.attempts.some(a=>a.questionId===q.id))){new Notice(tr("请先完成每道题的作答与自评"));return;}new ConfirmModal(this.app,mode==='recall'?tr("确认回忆完成"):tr("确认第 {0} 轮复习", [round]),tr("确认所有题目已经先作答、再查看参考内容并完成自评。薄弱点会保存在 Error Log 中。"),tr("确认完成"),async()=>{record.completedAt=now();this.celebrateFlow={path:file.path,mode,round,until:Date.now()+1600};await this.saveFlow(file,flow,true);if(mode==='review'&&round===3)await this.markStage(file,'reviewed');await this.rerenderLesson(file);}).open();};
+    const done=finish.createEl('button',{text:completed?tr("已完成"):tr("确认本轮完成"),cls:'lh-primary'});done.disabled=completed||!!analysis;
+    done.onclick=()=>{if(!questions.length||questions.some(q=>!record.attempts.some(a=>a.questionId===q.id))){new Notice(tr("请先完成每道题的作答与自评"));return;}new ConfirmModal(this.app,mode==='recall'?tr("确认回忆完成"):tr("确认第 {0} 轮复习", [round]),tr("确认所有题目已经先作答、再查看参考内容并完成自评。薄弱点会保存在 Error Log 中。"),tr("确认完成"),async()=>{record.completedAt=now();this.celebrateFlow={path:file.path,mode,round,until:Date.now()+1600};await this.saveFlow(file,flow,true);if(mode==='review'&&round===3)await this.markStage(file,'reviewed');await this.updateRollingSchedule().catch(error=>console.warn('Learning Hub lecture replan:',error));await this.rerenderLesson(file);}).open();};
   }
   async renderReview(el,file,flow,round,course){
     const plan=this.reviewPlan(flow),current=plan[round-1];
     if(!current){el.createDiv({text:tr("复习轮次无效。"),cls:'lh-empty'});return;}
     const rail=el.createDiv({cls:'lh-review-plan'});
-    for(const entry of plan){const item=rail.createEl('button',{cls:`lh-review-plan-item${entry.round===round?' is-current':''}${entry.completedAt?' is-done':''}`});item.createEl('strong',{text:tr(entry.title)});item.createSpan({text:entry.completedAt?tr("已完成"):entry.due||tr("待排期")});item.onclick=()=>this.showWorkflow('review',course,file.path,entry.round);}
+    for(const entry of plan){const item=rail.createEl('button',{cls:`lh-review-plan-item${entry.round===round?' is-current':''}${entry.completedAt?' is-done':''}`});item.createEl('strong',{text:tr(entry.title)});item.createSpan({text:entry.completedAt?tr("已完成"):entry.due||tr("待排期")});const duration=this.reviewEstimatedMinutes(flow,entry.round);if(duration)item.createSpan({text:tr("预计 {0} 分钟",[duration]),cls:'lh-review-round-duration'});item.onclick=()=>this.showWorkflow('review',course,file.path,entry.round);}
     if(!current.unlocked&&!current.completedAt){const lock=el.createDiv({cls:'lh-review-locked'});setIcon(lock.createSpan(),'lock-keyhole');lock.createEl('h2',{text:tr("本轮尚未解锁")});lock.createEl('p',{text:!flow.milestones.learnedAt?tr("先确认课堂学习，才能建立复习日期。"):!flow.recall.completedAt?tr("先完成引导式回忆，再开始间隔复习。"):plan[round-2]&&!plan[round-2].completedAt?tr("先完成上一轮复习。"):tr("预计 {0} 解锁。", [current.due])});return;}
-    const brief=el.createDiv({cls:'lh-review-brief'});brief.createEl('strong',{text:tr(current.subtitle)});brief.createSpan({text:tr("建议 {0} · {1} 到期", [tr(current.minutes), current.due])});
+    const brief=el.createDiv({cls:'lh-review-brief'});brief.createEl('strong',{text:tr(current.subtitle)});const currentEstimate=this.reviewEstimatedMinutes(flow,round);brief.createSpan({text:tr("建议 {0} · {1} 到期", [currentEstimate?tr("预计 {0} 分钟",[currentEstimate]):tr(current.minutes), current.due])});
     const source=el.createDiv({cls:'lh-review-homework'});
     const sourceHead=source.createDiv({cls:'lh-review-homework-head'});sourceHead.createEl('h2',{text:tr("参考作业")});sourceHead.createSpan({text:tr("按标注知识点出引导题 · 原件可打开")});
     const assignments=(await this.readAssignments(course)).assignments.filter(a=>a.importStatus!=='uploading');
@@ -2617,12 +2829,13 @@ module.exports=class LearningHub extends Plugin {
       if(firstPdf){const course=lesson.path.slice(ROOT.length+1).split('/')[0];await this.showWorkflow('preview',course,lesson.path,0,firstPdf.path);void this.generatePreviewDraft(lesson).catch(error=>{console.error('Learning Hub preview AI:',error);new Notice(tr("课件已保存；预习内容未生成：{0}", [error.message]),7000);});}
     };input.click();
   }
-  async generatePreviewDraft(lesson){
+  async generatePreviewDraft(lesson,{guideOnly=false}={}){
     this.analysisByLesson=this.analysisByLesson||new Map();
     if(this.analysisByLesson.has(lesson.path))throw new Error(tr("这讲课件正在解析，请稍候。"));
     this.previewErrors=this.previewErrors||new Map();this.previewErrors.delete(lesson.path);
-    const analysis={phase:'extract',startedAt:Date.now(),lessonPath:lesson.path,inputChars:0,receivedChars:0,tokenUsage:null,reasoningSummary:'',reasoningIndex:null,filesProcessed:0,fileCount:this.pdfs(lesson).length,model:this.state.ai.model||tr('默认模型'),effort:this.state.ai.effort||tr('默认强度')};
-    const setPhase=async phase=>{analysis.phase=phase;this.analysisByLesson.set(lesson.path,analysis);await this.rerenderLesson(lesson);this.updatePreviewProgress(analysis);};
+    const analysis={guideOnly,phase:'extract',startedAt:Date.now(),lessonPath:lesson.path,inputChars:0,receivedChars:0,tokenUsage:null,reasoningSummary:'',reasoningIndex:null,filesProcessed:0,fileCount:this.pdfs(lesson).length,model:this.state.ai.model||tr('默认模型'),effort:this.state.ai.effort||tr('默认强度')};
+    const refresh=async()=>{await this.rerenderLesson(lesson);for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='lesson'&&leaf.view.lessonPath===lesson.path)await leaf.view.render();};
+    const setPhase=async phase=>{analysis.phase=phase;this.analysisByLesson.set(lesson.path,analysis);await refresh();this.updatePreviewProgress(analysis);};
     const ticker=setInterval(()=>this.updatePreviewProgress(analysis),1000);
     await setPhase('extract');
     try{
@@ -2631,7 +2844,8 @@ module.exports=class LearningHub extends Plugin {
       analysis.pages=(slides.match(/\[第 \d+ 页\]/g)||[]).length;
       await setPhase('queued');
       const course=lesson.path.slice(ROOT.length+1).split('/')[0];
-      const result=validatePreviewDraft(await this.runAi(previewPrompt(course,lesson.basename,pdfs.map(pdf=>pdf.name),slides,this.state.ai.language),previewSchema,{
+      const prompt=guideOnly?lessonGuidePrompt({course,lesson:lesson.basename,pdfNames:pdfs.map(pdf=>pdf.name),slides,language:this.state.ai.language}):previewPrompt(course,lesson.basename,pdfs.map(pdf=>pdf.name),slides,this.state.ai.language);
+      const result=(guideOnly?validateLessonGuideDraft:validatePreviewDraft)(await this.runAi(prompt,guideOnly?lessonGuideSchema:previewSchema,{
         timeoutMs:PREVIEW_TIMEOUT_MS,
         onStatus:phase=>{analysis.phase=phase;this.updatePreviewProgress(analysis);},
         onProgress:delta=>{analysis.receivedChars+=String(delta||'').length;analysis.phase='receiving';this.updatePreviewProgress(analysis);},
@@ -2646,18 +2860,20 @@ module.exports=class LearningHub extends Plugin {
       }));
       analysis.phase='saving';this.updatePreviewProgress(analysis);
       const flow=await this.readFlow(lesson);
-      flow.preview={...mergeGeneratedPreview(flow.preview,result,()=>crypto.randomUUID()),sourcePath:pdfs[0].path,sourceName:pdfs[0].name,sourcePaths:pdfs.map(pdf=>pdf.path),sourceNames:pdfs.map(pdf=>pdf.name),generatedAt:now()};
-      delete flow.previewDraft;
-      if(flow.lessonTitleSource!=='manual'){flow.lessonTitle=result.title;flow.lessonTitleSource='ai';}
+      if(guideOnly)flow.preview={...flow.preview,...result,guideGeneratedAt:now(),guideSourceNames:pdfs.map(pdf=>pdf.name)};
+      else flow.preview={...mergeGeneratedPreview(flow.preview,result,()=>crypto.randomUUID()),sourcePath:pdfs[0].path,sourceName:pdfs[0].name,sourcePaths:pdfs.map(pdf=>pdf.path),sourceNames:pdfs.map(pdf=>pdf.name),generatedAt:now()};
+      if(!guideOnly)delete flow.previewDraft;
+      if(!guideOnly&&flow.lessonTitleSource!=='manual'){flow.lessonTitle=result.title;flow.lessonTitleSource='ai';}
       await this.saveFlow(lesson,flow);
+      await this.updateRollingSchedule().catch(error=>console.warn('Learning Hub preview replan:',error));
       await this.refreshNav();
       for(const leaf of this.app.workspace.getLeavesOfType(MAIN))if(leaf.view?.page==='lesson'&&leaf.view.course===course)await leaf.view.render();
-      new Notice(tr("《{0}》预习内容已生成。", [flow.lessonTitle||result.title]),7000);
+      new Notice(guideOnly?tr("《{0}》讲次导览已更新。",[flow.lessonTitle||lesson.basename]):tr("《{0}》预习内容已生成。", [flow.lessonTitle||result.title]),7000);
     }catch(error){
       const hint=/生成超过.*分钟|generation exceeded.*min/i.test(error.message)?tr('这份课件较长；可降低 Codex 思考强度后重试。'):tr('请检查 PDF 文字或 AI 设置后重试。');
       this.previewErrors.set(lesson.path,tr("生成失败：{0}。{1}", [error.message,hint]));
       throw error;
-    }finally{clearInterval(ticker);clearTimeout(analysis.reasoningRenderTimer);this.analysisByLesson.delete(lesson.path);await this.rerenderLesson(lesson);}
+    }finally{clearInterval(ticker);clearTimeout(analysis.reasoningRenderTimer);this.analysisByLesson.delete(lesson.path);await refresh();}
   }
   async generateNoteDraft(lesson){
     this.noteAnalysisByLesson||=new Map();this.noteErrors||=new Map();
@@ -2688,7 +2904,28 @@ module.exports=class LearningHub extends Plugin {
     }catch(error){this.noteErrors.set(lesson.path,tr("生成失败：{0}", [error.message]));throw error;}
     finally{clearInterval(ticker);clearTimeout(analysis.reasoningRenderTimer);this.noteAnalysisByLesson.delete(lesson.path);await this.rerenderLesson(lesson);}
   }
+  questionSessionKey(lesson,mode,round=0){return `${lesson.path}:${mode}:${round}`;}
+  clearQuestionProgress(analysis){
+    clearInterval(analysis.timer);for(const binding of analysis.ui||[]){clearTimeout(binding.reasoningState?.reasoningRenderTimer);if(binding.reasoningState)binding.reasoningState.reasoningRenderVersion=(binding.reasoningState.reasoningRenderVersion||0)+1;}analysis.ui?.clear();
+  }
+  renderQuestionGenerationProgress(host,analysis){
+    const root=host.createDiv({cls:'lh-preview-generating lh-question-generating',attr:{role:'status','aria-live':'polite'}}),headline=root.createDiv({cls:'lh-question-progress-head'});headline.createSpan({cls:'lh-analysis-spinner',attr:{'aria-hidden':'true'}});headline.createEl('strong',{text:analysis.mode==='recall'?tr('正在生成回忆问题'):tr('正在生成第 {0} 轮复习问题',[analysis.round])});
+    const steps=root.createDiv({cls:'lh-preview-progress-steps'}),binding={root,stepEls:[tr('读取资料'),tr('AI 生成'),tr('检查草案')].map(text=>steps.createSpan({text})),statusEl:root.createEl('p',{cls:'lh-preview-stage'}),elapsedEl:root.createEl('p',{cls:'lh-preview-elapsed',attr:{'aria-live':'off'}}),usageEl:root.createDiv({cls:'lh-preview-usage'})};
+    const reasoning=root.createDiv({cls:'lh-preview-reasoning'}),head=reasoning.createDiv({cls:'lh-preview-reasoning-head'});head.createSpan({text:tr('思考摘要'),cls:'lh-preview-reasoning-label'});const dots=head.createSpan({cls:'lh-preview-thinking-dots',attr:{'aria-hidden':'true'}});for(let i=0;i<3;i++)dots.createSpan({cls:'lh-preview-thinking-dot'});
+    binding.reasoningEl=reasoning.createDiv({cls:'lh-preview-reasoning-text lh-preview-markdown',text:tr('摘要会在生成过程中更新')});binding.reasoningState={reasoningEl:binding.reasoningEl,lessonPath:analysis.lessonPath};analysis.ui.add(binding);this.updateQuestionProgress(analysis);
+  }
+  updateQuestionProgress(analysis){
+    const phases={reading:tr('正在读取笔记、预习记录与薄弱点…'),queued:tr('等待 Codex 任务开始…'),connecting:tr('正在连接 Codex…'),starting:tr('正在提交问题生成任务…'),generating:tr('Codex 正在生成问题与参考答案…'),thinking:tr('Codex 正在分析知识点与薄弱点…'),receiving:tr('正在接收问题草案…'),validating:tr('正在检查问题与学习用时…'),saving:tr('正在保存待确认的问题草案…')},step=analysis.phase==='reading'?0:['validating','saving'].includes(analysis.phase)?2:1;
+    const seconds=Math.floor((Date.now()-analysis.startedAt)/1000),duration=`${pad(Math.floor(seconds/60))}:${pad(seconds%60)}`;
+    for(const binding of analysis.ui){if(!binding.root.isConnected){clearTimeout(binding.reasoningState?.reasoningRenderTimer);analysis.ui.delete(binding);continue;}binding.statusEl.setText(phases[analysis.phase]||phases.generating);binding.elapsedEl.setText(tr('已用时 {0}{1} · {2} / {3}',[duration,tr(' · 已接收 {0} 字符',[analysis.receivedChars.toLocaleString()]),analysis.model,analysis.effort]));renderTokenUsage(binding.usageEl,analysis.tokenUsage);for(const [i,element] of binding.stepEls.entries()){element.classList.toggle('is-active',i===step);element.classList.toggle('is-done',i<step);}if(analysis.reasoningSummary&&binding.reasoningState.reasoningSummary!==analysis.reasoningSummary){binding.reasoningState.reasoningSummary=analysis.reasoningSummary;this.renderNoteReasoning(binding.reasoningState);}}
+  }
   async generateQuestionDraft(course,lesson,mode,round=0,assignment=null){
+    const key=this.questionSessionKey(lesson,mode,round);this.questionAnalysisBySession||=new Map();this.questionErrorsBySession||=new Map();
+    if(this.questionAnalysisBySession.has(key))throw new Error(tr('本轮问题正在生成，请稍候。'));
+    const analysis={phase:'reading',startedAt:Date.now(),lessonPath:lesson.path,mode,round,receivedChars:0,tokenUsage:null,reasoningSummary:'',reasoningIndex:null,model:this.state.ai.model||tr('Codex 默认'),effort:this.state.ai.effort||tr('模型默认'),ui:new Set()};
+    this.questionAnalysisBySession.set(key,analysis);this.questionErrorsBySession.delete(key);analysis.timer=setInterval(()=>this.updateQuestionProgress(analysis),1000);
+    try{
+      await this.rerenderLesson(lesson);
     const flow=await this.readFlow(lesson);
     if(mode==='review'&&!this.reviewPlan(flow)[round-1]?.unlocked)throw new Error(tr("本轮复习尚未解锁。"));
     const note=await this.app.vault.read(lesson);
@@ -2706,11 +2943,25 @@ module.exports=class LearningHub extends Plugin {
         otherLessons.push({lesson:other.basename,note:await this.app.vault.read(other)});
       }
     }
-    const raw=await this.runAi(questionsPrompt({course,lesson:lesson.basename,mode,round,note,preview:flow.preview,errors,assignment:assignment?{title:assignment.title,difficulty:assignment.difficulty,topics:assignment.topics}:null,assignmentText,otherLessons,language:this.state.ai.language}),questionsSchema);
-    const questions=validateQuestions(raw);
-    const fresh=await this.readFlow(lesson),record=mode==='recall'?fresh.recall:fresh.reviews.rounds[round-1];
-    record.questionDraft={questions,assignment:assignment?{id:assignment.id,title:assignment.title,files:assignment.files}:null,createdAt:now()};
-    await this.saveFlow(lesson,fresh);await this.rerenderLesson(lesson);
+    const record=mode==='recall'?flow.recall:flow.reviews.rounds[round-1];
+    const existingQuestions=mode==='recall'?flow.recall.questions:round===1?[...flow.recall.questions,...record.questions]:record.questions;
+    analysis.phase='queued';this.updateQuestionProgress(analysis);
+    const practiceMaterials=await this.reviewPracticeMaterials(course,lesson.path);
+    const raw=await this.runAi(questionsPrompt({practiceMaterials,course,lesson:lesson.basename,mode,round,note,preview:flow.preview,errors,assignment:assignment?{title:assignment.title,difficulty:assignment.difficulty,topics:assignment.topics}:null,assignmentText,otherLessons,existingQuestions,language:this.state.ai.language}),questionsSchema,{timeoutMs:PREVIEW_TIMEOUT_MS,
+      onStatus:phase=>{analysis.phase=phase;this.updateQuestionProgress(analysis);},
+      onProgress:delta=>{analysis.receivedChars+=String(delta||'').length;analysis.phase='receiving';this.updateQuestionProgress(analysis);},
+      onTokenUsage:usage=>{analysis.tokenUsage=usage;this.updateQuestionProgress(analysis);},
+      onReasoningSummary:(delta,index)=>{if(typeof index==='number'&&analysis.reasoningIndex!==index)analysis.reasoningSummary='';if(typeof index==='number')analysis.reasoningIndex=index;analysis.reasoningSummary+=String(delta||'');this.updateQuestionProgress(analysis);},
+    });
+    analysis.phase='validating';this.updateQuestionProgress(analysis);
+    const questions=validateQuestions(raw),estimatedMinutes=validateEstimatedMinutes(raw.estimatedMinutes);
+    const fresh=await this.readFlow(lesson),targetRecord=mode==='recall'?fresh.recall:fresh.reviews.rounds[round-1];
+    targetRecord.questionDraft={questions,estimatedMinutes,estimatedQuestionCount:existingQuestions.length+questions.length,assignment:assignment?{id:assignment.id,title:assignment.title,files:assignment.files}:null,createdAt:now(),practiceReferences:practiceMaterials.map(item=>({id:item.id,title:item.title,kind:item.kind}))};
+    analysis.phase='saving';this.updateQuestionProgress(analysis);
+    await this.saveFlow(lesson,fresh);
     new Notice(tr("问题草案已生成，请核对后采用。"));
-  }
-};
+    }catch(error){this.questionErrorsBySession.set(key,String(error.message||error));throw error;}
+    finally{this.clearQuestionProgress(analysis);if(this.questionAnalysisBySession.get(key)===analysis)this.questionAnalysisBySession.delete(key);if(!this.unloaded)await this.rerenderLesson(lesson);}
+  }};
+
+Object.assign(module.exports.prototype,require('./modules/practice-views').practiceMethods);

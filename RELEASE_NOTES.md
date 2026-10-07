@@ -1,42 +1,22 @@
-# Learning Hub 1.0.0 正式版
+## Learning Hub v1.1.0
 
-Learning Hub 是面向 Obsidian 桌面版的学习工作空间，将课程、讲次、预习、笔记、复习、作业、批注和日程集中管理。
+本次更新覆盖日程、待办、作业与练习资料、复习上下文和界面一致性。
 
-## 主要功能
+- 七天任务总览与三日日历：任务视图聚焦学习项目，日历展示完整作息、课程和休息；选中日期更宽。
+- Codex 生成未确认日期的日程，DeepSeek 连续对话调整日程；时间规则独立管理，冲突检查与确认应用。
+- 紧急优先、置顶仅影响展示；可选预计用时及没有预计结束日期的长期任务。
+- 已上传讲次的预习、回忆和已解锁复习同步待办，不铺开待解锁事项。
+- 作业自动整理和估时，独立详情页，支持具体小问错题。
+- 新增统一 Tutorial / Lab 资料管理，可组合 PDF、Markdown、TXT、Notebook，区分题目、答案、说明与模板。
+- 复习与学习助手按讲次参考相关练习资料，保留页码／Cell、来源冲突与不确定性；Notebook 只读文本，不执行代码。
+- 统一 AI 用量与费用面板，默认简洁、详情可展开；系统 AI 回复跟随界面语言。
+- 作业与练习的标题、分类栏、卡片、空状态、上传入口更紧凑一致；作业 / Tutorial / Lab 分类栏加宽。
+- 通用空白仓库初始化、空课程默认值与便携程序查找；公开文件不附带个人资料、配置或密钥。
 
-- 学习主页、学期管理和独立课程空间。
-- Syllabus 解析、课件上传、预习知识点与知识导图。
-- 主笔记草案确认、课后回忆与三轮间隔复习。
-- 作业题目整理、错题标记与独立 Lab Session。
-- DeepSeek 学习助手、选文解释、页面批注和学习进度圆环。
-- 待办事项、滚动日程、可学习时间、固定安排与学习复盘。
-- 时间草稿、自动标题与仓库指南。
-- 本机 Codex 集成和只读 Google Calendar 同步。
-- 中文与英文界面，助手语言和资料生成语言可分别设置。
+### 安装 / Installation
 
-## 安装方法
+下载 **learning-hub-1.1.0.zip**，将内含 `main.js`、`manifest.json`、`styles.css` 直接放入 `<vault>/.obsidian/plugins/learning-hub/`，重启并启用。升级只替换三个程序文件，保留自己的运行数据。需要 Obsidian 桌面版，AI 需自行配置 Codex / DeepSeek，PDF 需安装 pdftotext。
 
-下载 `learning-hub-1.0.0.zip`，将其中的三个文件直接放入：
+Download the installation ZIP and place its three files directly in the plugin directory. Preserve your runtime data when upgrading. Desktop only; configure your own AI services and PDF extractor.
 
-```text
-<vault>/.obsidian/plugins/learning-hub/
-├── main.js
-├── manifest.json
-└── styles.css
-```
-
-重新启动 Obsidian，在「设置 → 第三方插件」中启用 Learning Hub。
-
-也可以分别下载下方的 `main.js`、`manifest.json` 和 `styles.css`。安装时不需要源码或开发工具。
-
-## 首次使用
-
-点击学习空间图标，或运行「Learning Hub: 打开学习主页」。插件会自动创建必要目录和入口文件；在插件设置中创建自己的学期与课程即可开始使用。
-
-基础功能无需 AI 账号。使用相关功能时，请配置自己的 Codex CLI、DeepSeek API key、PDF 文字提取工具，以及可选的 Google Calendar 连接。
-
-插件不包含预置账号、API key、个人课程或聊天记录。运行配置和学习状态保存在当前 vault 的隐藏目录 `.learning-hub/` 中。
-
-完整使用说明：[中文 README](https://github.com/haoyuanzhang2007/obsidian-learning-hub#readme) · [English README](https://github.com/haoyuanzhang2007/obsidian-learning-hub/blob/main/README.en.md)
-
-仅支持 Obsidian 桌面版。扫描版 PDF 需先 OCR；暂不支持 PPT 文字解析。
+详见 [中文说明](https://github.com/haoyuanzhang2007/obsidian-learning-hub/blob/main/README.md) / [English guide](https://github.com/haoyuanzhang2007/obsidian-learning-hub/blob/main/README.en.md).

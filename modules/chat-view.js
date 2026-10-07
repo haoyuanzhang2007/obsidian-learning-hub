@@ -2,7 +2,7 @@ const {translate} = require('./i18n');
 const {ItemView,MarkdownRenderer,Notice,setIcon}=require('obsidian');
 const {randomUUID}=require('crypto');
 const {DEEPSEEK_MODELS,studyContext}=require('./deepseek-chat');
-const {normalizeDeepSeekUsage}=require('./token-usage');
+const {normalizeDeepSeekUsage,renderTokenUsage}=require('./token-usage');
 const {estimateDeepSeekCost}=require('./deepseek-pricing');
 const {mentionAt,searchContextFiles}=require('./chat-context');
 
@@ -113,7 +113,7 @@ class LearningChatView extends ItemView{
       const token=mentionAt(input.value,input.selectionStart);if(!token||this.attachments.length>=4){mentionMenu.hidden=true;return;}
       const matches=searchContextFiles(this.app.vault.getFiles(),token.query).filter(file=>!this.attachments.includes(file.path));
       mentionMenu.hidden=!matches.length;
-      for(const file of matches){const option=mentionMenu.createEl('button',{cls:'lh-chat-mention-item',attr:{type:'button'}});option.createSpan({text:file.basename});option.createSmall({text:file.path});option.onmousedown=event=>event.preventDefault();option.onclick=()=>{this.attachments.push(file.path);input.value=input.value.slice(0,token.start)+input.value.slice(token.end);this.draftText=input.value;void this.render();};}
+      for(const file of matches){const option=mentionMenu.createEl('button',{cls:'lh-chat-mention-item',attr:{type:'button'}});option.createSpan({text:file.basename});option.createEl('small',{text:file.path});option.onmousedown=event=>event.preventDefault();option.onclick=()=>{this.attachments.push(file.path);input.value=input.value.slice(0,token.start)+input.value.slice(token.end);this.draftText=input.value;void this.render();};}
     };
     input.oninput=updateMentions;
     input.onkeyup=event=>{if(event.key!=='Enter')updateMentions();};
@@ -146,11 +146,8 @@ class LearningChatView extends ItemView{
     const usage=normalizeDeepSeekUsage(message.usage);if(!usage)return;
     const billing=message.billing||estimateDeepSeekCost({usage,model:message.model,at:new Date().toISOString(),pricing:this.plugin.state.deepseek.pricing,endpoint:this.plugin.state.deepseek.endpoint});
     const historicalEstimate=!message.billing&&billing;
-    const details=row.createEl('details',{cls:'lh-chat-usage'}),summary=details.createEl('summary');
-    summary.createSpan({text:billing?this.tr(historicalEstimate?'按现价约 ¥{0}':'约 ¥{0}',[billing.amount.toFixed(billing.amount<.0001?6:4)]):this.tr('费用暂不可算'),cls:'lh-chat-cost'});
-    if(usage.totalTokens!==null)summary.createSpan({text:`${usage.totalTokens.toLocaleString(this.locale())} tokens`,cls:'lh-chat-token-total'});
-    const grid=details.createDiv({cls:'lh-chat-usage-grid'});
-    for(const [label,value] of [['输入',usage.inputTokens],['缓存命中',usage.cachedInputTokens],['缓存未命中',usage.cacheWriteInputTokens],['输出',usage.outputTokens],['推理',usage.reasoningOutputTokens]])if(value!==null){const item=grid.createDiv();item.createSpan({text:this.tr(label)});item.createEl('strong',{text:value.toLocaleString(this.locale())});}
+    const rendered=renderTokenUsage(row.createDiv({cls:'lh-chat-usage'}),message.usage,{provider:'DeepSeek',billing,historicalEstimate,translate:this.tr.bind(this)});
+    const details=rendered.body;
     if(billing){details.createEl('p',{text:this.tr('{0} · 价格更新于 {1}',[this.tr(billing.band==='peak'?'高峰价格':'空闲价格'),new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(billing.verifiedAt))])});details.createEl('p',{text:this.tr('每百万 tokens：命中 ¥{0} · 未命中 ¥{1} · 输出 ¥{2}',[billing.rates.hit,billing.rates.miss,billing.rates.output])});const source=details.createEl('a',{text:this.tr('官方价格'),attr:{href:billing.source,target:'_blank',rel:'noopener'}});details.createEl('p',{text:this.tr('按 API 用量估算，实际扣费以 DeepSeek 账单为准。')});}
     else details.createEl('p',{text:this.tr('缺少用量、历史价格或自定义接口的价格，无法准确计算。')});
   }

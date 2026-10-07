@@ -73,6 +73,23 @@ function uniqueDraftPath(folder, title, exists) {
   return path;
 }
 
+function draftImportPath(filename, exists = () => false) {
+  const name = String(filename || '').replace(/\\/g, '/').split('/').pop() || '';
+  if (!/\.md$/i.test(name)) return null;
+  const title = name.replace(/\.md$/i, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\\/:*?"<>|#\[\]^]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .slice(0, 100)
+    .trim();
+  if (!title) return null;
+  let path = `Draft/${title}.md`;
+  let index = 2;
+  while (exists(path)) path = `Draft/${title} (${index++}).md`;
+  return path;
+}
+
 module.exports = {
   DEFAULT_DRAFT_SETTINGS,
   normalizeDraftSettings,
@@ -85,4 +102,5 @@ module.exports = {
   draftTitleRequest,
   parseDraftTitle,
   uniqueDraftPath,
+  draftImportPath,
 };

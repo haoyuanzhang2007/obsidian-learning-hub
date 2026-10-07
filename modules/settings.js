@@ -2,8 +2,10 @@ const { t: tr, uiLocale } = require('./i18n');
 const { PluginSettingTab, Setting, Notice, Modal } = require('obsidian');
 const { normalizeGenerationLanguage } = require('./generation-language');
 const { normalizeDraftSettings } = require('./drafts');
-const { normalizeRestBlocks } = require('./study-availability');
+const { normalizeRestBlocks, normalizeDateAvailability } = require('./study-availability');
 const { DEEPSEEK_ENDPOINT, DEEPSEEK_MODELS } = require('./deepseek-chat');
+
+const {normalizeScheduleProfile,normalizeRoutineExceptions}=require('./schedule-profile');
 
 const DEFAULT_AI = {
   executable: 'codex',
@@ -15,20 +17,26 @@ const DEFAULT_AI = {
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   availability: [1, 2, 3, 4, 5, 6, 0].map(day => ({ day, start: '08:00', end: '22:00' })),
   restBlocks: [],
+  dateAvailability: [],
+  dailyRoutine: {wakeTime:'',sleepTime:''},
   fixedBlocks: [],
+  scheduleProfile:null,
+  routineExceptions:[],
 };
-const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const validTime = value => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 
 function normalizeAiSettings(value = {}) {
   let restBlocks=[];
   try{restBlocks=normalizeRestBlocks(Array.isArray(value.restBlocks)?value.restBlocks:[]);}catch(error){console.warn('Learning Hub rest settings were invalid and have been ignored:',error);}
+  const scheduleProfile=normalizeScheduleProfile(value.scheduleProfile);
   return {
     ...DEFAULT_AI, ...value,
     language: normalizeGenerationLanguage(value.language),
     maxConcurrentTasks: [1, 2, 3, 4].includes(Number(value.maxConcurrentTasks)) ? Number(value.maxConcurrentTasks) : DEFAULT_AI.maxConcurrentTasks,
     availability: Array.isArray(value.availability) ? value.availability.filter(row => Number.isInteger(Number(row.day)) && Number(row.day) >= 0 && Number(row.day) <= 6 && validTime(row.start) && validTime(row.end) && row.start < row.end).map(row => ({ day: Number(row.day), start: row.start, end: row.end })) : DEFAULT_AI.availability.map(row => ({ ...row })),
-    restBlocks,
+    restBlocks,scheduleProfile,routineExceptions:normalizeRoutineExceptions(value.routineExceptions||[],scheduleProfile),
+    dateAvailability: normalizeDateAvailability(value.dateAvailability||[]),
+    dailyRoutine: {wakeTime:validTime(value.dailyRoutine?.wakeTime)?value.dailyRoutine.wakeTime:'',sleepTime:validTime(value.dailyRoutine?.sleepTime)?value.dailyRoutine.sleepTime:''},
     fixedBlocks: Array.isArray(value.fixedBlocks) ? value.fixedBlocks.filter(row => Number.isInteger(Number(row.day)) && Number(row.day) >= 0 && Number(row.day) <= 6 && validTime(row.start) && validTime(row.end) && row.start < row.end && String(row.title || '').trim()).map(row => ({ day: Number(row.day), start: row.start, end: row.end, title: String(row.title).trim() })) : [],
   };
 }
@@ -58,7 +66,7 @@ class CreateCourseModal extends Modal {
     for(const row of this.plugin.state.semesters||[])semester.createEl('option',{text:row.name,attr:{value:row.id}});
     semester.value=this.plugin.state.activeSemester||this.plugin.state.semesters?.[0]?.id||'';
     const codeRow=el.createDiv({cls:'lh-form-row'});codeRow.createEl('label',{text:tr("课程代码")});
-    const code=codeRow.createEl('input',{attr:{type:'text',placeholder:tr("例如：COMP 1002")}});
+    const code=codeRow.createEl('input',{attr:{type:'text',placeholder:tr("例如：COMP 1001")}});
     const nameRow=el.createDiv({cls:'lh-form-row'});nameRow.createEl('label',{text:tr("课程名称")});
     const name=nameRow.createEl('input',{attr:{type:'text',placeholder:tr("例如：Machine Learning")}});
     el.createEl('p',{text:tr("若相同课程已存在于其他学期，会复用原课程文件与学习记录。"),cls:'lh-confirm-copy'});
@@ -82,9 +90,9 @@ class LearningHubSettings extends PluginSettingTab {
     const group = title => {const card=root.createEl('section',{cls:'lh-settings-section'});card.createEl('h3',{text:title});return card;};
     let section=group(tr('界面与语言'));
     section.createEl('p',{text:tr('选择界面语言，页面和设置会立即更新。笔记与已有 AI 内容保留原文。')});
-    new Setting(section).setName(tr('界面语言')).setDesc(tr('中文或 English；切换后立即生效。')).addDropdown(dropdown=>dropdown.addOption('zh-CN','中文').addOption('en','English').setValue(plugin.state.interfaceLanguage).onChange(async value=>{await plugin.setInterfaceLanguage(value);this.display();}));
+    new Setting(section).setName(tr('界面语言')).setDesc(tr('中文或 English；系统 AI 的日程、时间规则和待办回复跟随此设置。')).addDropdown(dropdown=>dropdown.addOption('zh-CN','中文').addOption('en','English').setValue(plugin.state.interfaceLanguage).onChange(async value=>{await plugin.setInterfaceLanguage(value);this.display();}));
     new Setting(section).setName(tr('学习助手语言')).setDesc(tr('用于助手侧边栏与 AI 解释，可与资料生成语言分别设置；已有回答保留原文。')).addDropdown(dropdown=>dropdown.addOption('zh-CN','中文').addOption('en','English').setValue(plugin.state.deepseek.language).onChange(async value=>{await plugin.setAssistantLanguage(value);}));
-    new Setting(section).setName(tr("资料生成语言")).setDesc(tr("用于预习、主笔记、回忆与复习问题、Lab Session 解析及 AI 日程摘要；已有内容不会自动翻译。")).addDropdown(dropdown => dropdown.addOption('zh-CN',tr("中文（默认）")).addOption('en','English').setValue(ai.language).onChange(async value => { ai.language = normalizeGenerationLanguage(value); await save(); }));
+    new Setting(section).setName(tr("资料生成语言")).setDesc(tr("用于预习、主笔记、回忆与复习问题、作业和 Lab Session 解析；已有内容不会自动翻译。")).addDropdown(dropdown => dropdown.addOption('zh-CN',tr("中文（默认）")).addOption('en','English').setValue(ai.language).onChange(async value => { ai.language = normalizeGenerationLanguage(value); await save(); }));
     section=group(tr('Codex · 本地生成'));
     new Setting(section).setName(tr("Codex 程序")).setDesc(tr("本机 codex 可执行文件的绝对路径。")).addText(input => input.setPlaceholder('/path/to/codex').setValue(ai.executable).onChange(async value => { ai.executable = value.trim(); plugin.resetAiClient(); await save(); }));
     new Setting(section).setName(tr("连接与模型列表")).setDesc(tr("读取本机 Codex 可用模型，不会发起模型推理。")).addButton(button => button.setButtonText(tr("读取可用模型")).onClick(async () => {
@@ -112,10 +120,10 @@ class LearningHubSettings extends PluginSettingTab {
     });
     new Setting(section).setName(tr("PDF 文本工具")).setDesc(tr("可选。留空时自动查找 pdftotext；扫描版 PDF 需先 OCR。")).addText(input => input.setPlaceholder(tr("自动查找")).setValue(ai.pdfExtractor).onChange(async value => { ai.pdfExtractor = value.trim(); await save(); }));
     section=group(tr("DeepSeek API · 全插件共用"));
-    section.createEl('p', { text: tr("所有 DeepSeek 功能共用此 API Key；接口地址和默认模型供学习助手、待办对话与日程等通用功能使用。") });
+    section.createEl('p', { text: tr("所有 DeepSeek 功能共用此 API Key、接口地址和默认模型；AI 解释、仓库指南、学习助手、待办对话与日程均使用这里的配置。") });
     const deepseek = plugin.state.deepseek;
     new Setting(section).setName(tr("API 地址")).setDesc(tr("填写完整的 HTTPS chat/completions 地址；默认使用 DeepSeek 官方接口。")).addText(input => input.setPlaceholder(DEEPSEEK_ENDPOINT).setValue(deepseek.endpoint || DEEPSEEK_ENDPOINT).onChange(async value => { deepseek.endpoint = value.trim(); await save(); }));
-    new Setting(section).setName('API Key').setDesc(tr("由本插件的 DeepSeek 功能共用；只在你主动使用相关 AI 功能时发送。")).addText(input => { input.inputEl.type = 'password'; input.setPlaceholder('sk-…').setValue(deepseek.apiKey || '').onChange(async value => { deepseek.apiKey = value.trim(); await save(); }); });
+    new Setting(section).setName('API Key').setDesc(tr("这是 Learning Hub 唯一的 DeepSeek API Key；AI 解释、仓库指南、学习助手、待办与日程共用此密钥，只在你主动使用相关 AI 功能时发送。")).addText(input => { input.inputEl.type = 'password'; input.setPlaceholder('sk-…').setValue(deepseek.apiKey || '').onChange(async value => { deepseek.apiKey = value.trim(); await save(); }); });
     new Setting(section).setName(tr("默认模型")).addDropdown(dropdown => {
       for (const model of DEEPSEEK_MODELS) dropdown.addOption(model.id, model.label);
       dropdown.setValue(deepseek.model).onChange(async value => { deepseek.model = value; await save(); });
@@ -149,27 +157,11 @@ class LearningHubSettings extends PluginSettingTab {
       connection.addButton(button=>button.setButtonText(tr("断开")).onClick(async()=>{await plugin.disconnectGoogleCalendar();this.display();}));
       for(const calendar of google.calendars)new Setting(section).setName(calendar.title).setDesc(calendar.primary?tr("主日历"):'').addToggle(toggle=>toggle.setValue(google.calendarIds.includes(calendar.id)).onChange(async enabled=>{const next=enabled?[...new Set([...google.calendarIds,calendar.id])]:google.calendarIds.filter(id=>id!==calendar.id);if(!next.length){new Notice(tr("请至少保留一个日历。"));this.display();return;}google.calendarIds=next;await save();try{await plugin.syncGoogleCalendar({quiet:true});}catch(error){new Notice(tr("日历同步失败：{0}", [error.message]));}this.display();}));
     }
-    section=group(tr("固定安排"));
-    section.createEl('p', { text: tr("手动录入课程、会议等固定时段；AI 排程会避开它们。") });
-    this.rows(section, ai.fixedBlocks, save);
-    new Setting(section).addButton(button => button.setButtonText(tr("＋ 添加固定安排")).onClick(async () => { ai.fixedBlocks.push({ day: 1, start: '09:00', end: '10:00', title: tr("课程") }); await save(); this.display(); }));
     for (const entry of plugin.integratedSettingTabs || []) {
       const section = root.createEl('section', { cls: 'lh-settings-section lh-settings-integrated-settings' });
       entry.tab.containerEl = section.createDiv({ cls: 'lh-settings-integrated-body' });
       entry.tab.display();
     }
-  }
-  rows(root, rows, save) {
-    rows.forEach((row, index) => {
-      const setting = new Setting(root).setName(row.title || tr("固定安排"));
-      setting.settingEl.addClass('lh-settings-time-row');
-      setting.settingEl.addClass('is-fixed');
-      setting.addText(input => input.setPlaceholder(tr("安排名称")).setValue(row.title).onChange(async value => { row.title = value.trim(); await save(); }));
-      setting.addDropdown(input => {input.selectEl.setAttribute('aria-label',tr('星期')); WEEKDAYS.forEach((name, day) => input.addOption(String(day), tr(name))); input.setValue(String(row.day)).onChange(async value => { row.day = Number(value); await save(); }); });
-      setting.addText(input => { input.inputEl.type='time';input.inputEl.setAttribute('aria-label',tr('开始时间'));input.setPlaceholder('09:00').setValue(row.start).onChange(async value => { if (validTime(value)) { if(value>=row.end){new Notice(tr('结束时间应晚于开始时间'));this.display();return;}row.start = value; await save(); } }); });
-      setting.addText(input => { input.inputEl.type='time';input.inputEl.setAttribute('aria-label',tr('结束时间'));input.setPlaceholder('12:00').setValue(row.end).onChange(async value => { if (validTime(value)) { if(value<=row.start){new Notice(tr('结束时间应晚于开始时间'));this.display();return;}row.end = value; await save(); } }); });
-      setting.addButton(button => button.setIcon('trash').setTooltip(tr("删除")).onClick(async () => { rows.splice(index, 1); await save(); this.display(); }));
-    });
   }
 }
 

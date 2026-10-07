@@ -77,4 +77,39 @@ function formatDeepSeekUsage(value) {
   return tr("DeepSeek 用量｜{0}", [formatUsageBlock(usage, tr("缓存未命中"))]);
 }
 
-module.exports = { normalizeUsageBlock, normalizeCodexUsage, formatCodexUsage, normalizeDeepSeekUsage, formatDeepSeekUsage };
+// One renderer for streaming progress, results, conversations and notices.
+// Token consumption is reported usage, not the account's remaining allowance.
+function renderTokenUsage(host, value, {provider='Codex', billing=null, historicalEstimate=false, translate=tr, showEmpty=false}={}) {
+  if(!host)return null;
+  const normalized=provider==='Codex'?normalizeCodexUsage(value):normalizeDeepSeekUsage(value);
+  const signature=JSON.stringify([value,provider,billing,historicalEstimate,showEmpty,translate('本次用量')]);
+  if(host._lhUsageSignature===signature)return host._lhUsageRendered;
+  host._lhUsageSignature=signature;
+  const wasOpen=!!host.querySelector?.('.lh-token-usage')?.open;
+  host._lhUsageRendered=null;
+  host.empty();
+  host.hidden=!normalized&&!showEmpty;
+  if(!normalized){if(showEmpty)host.createSpan({text:translate(provider==='Codex'?'Codex 本次没有返回 token 用量数据。':'DeepSeek 本次未返回 token 用量数据。'),cls:'lh-token-empty'});return null;}
+  const block=provider==='Codex'?normalized.last:normalized;
+  const count=n=>n===null||n===undefined?'—':Number(n).toLocaleString('en-US');
+  const total=block.totalTokens??(block.inputTokens!==null&&block.outputTokens!==null?block.inputTokens+block.outputTokens:null);
+  const box=host.createEl('details',{cls:'lh-token-usage'});box.open=wasOpen;
+  const summary=box.createEl('summary',{attr:{'aria-label':translate('查看用量')}});
+  summary.createSpan({text:provider,cls:'lh-token-provider'});
+  const metric=(label,value,primary=false)=>{const cell=summary.createSpan({cls:'lh-token-metric'+(primary?' is-primary':'')});cell.createSpan({text:label,cls:'lh-token-label'});cell.createEl('strong',{text:value});};
+  metric(translate('本次用量'),count(total)+' tokens',true);
+  if(block.inputTokens!==null)metric(translate('输入'),count(block.inputTokens));
+  if(block.outputTokens!==null)metric(translate('输出'),count(block.outputTokens));
+  if(billing&&Number.isFinite(billing.amount))metric(translate(historicalEstimate?'按现价估算':'估算费用'),'¥'+billing.amount.toFixed(billing.amount<.0001?6:4));
+  summary.createSpan({cls:'lh-token-chevron',attr:{'aria-hidden':'true'}});
+  const body=box.createDiv({cls:'lh-token-body'});
+  const section=(title,usage)=>{const group=body.createDiv({cls:'lh-token-section'});group.createDiv({text:translate(title),cls:'lh-token-section-title'});const grid=group.createDiv({cls:'lh-token-grid'});for(const [label,key] of [['总计','totalTokens'],['输入','inputTokens'],['输出','outputTokens'],['缓存命中','cachedInputTokens'],[provider==='Codex'?'缓存写入':'缓存未命中','cacheWriteInputTokens'],['推理','reasoningOutputTokens']]){if(usage[key]===null)continue;const cell=grid.createDiv({cls:'lh-token-detail'});cell.createSpan({text:translate(label)});cell.createEl('strong',{text:count(usage[key])});}};
+  section('本次用量',block);
+  if(provider==='Codex'){
+    if(Object.values(normalized.total).some(n=>n!==null))section('线程累计用量',normalized.total);
+    if(normalized.modelContextWindow!==null){const line=body.createDiv({cls:'lh-token-note'});line.createSpan({text:translate('模型上下文窗口')});line.createEl('strong',{text:count(normalized.modelContextWindow)+' tokens'});}
+  }
+  return host._lhUsageRendered={box,body,usage:normalized};
+}
+
+module.exports = { renderTokenUsage, normalizeUsageBlock, normalizeCodexUsage, formatCodexUsage, normalizeDeepSeekUsage, formatDeepSeekUsage };

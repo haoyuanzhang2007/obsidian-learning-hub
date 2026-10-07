@@ -17,7 +17,7 @@ module.exports = {
   "QUESTION {0}": "问题 {0}",
   "LEARNING SPACE / AI": "学习空间 / AI",
   "Learning Hub · AI 与日程": "Learning Hub · 设置",
-  "所有 DeepSeek 功能共用此 API Key；接口地址和默认模型供学习助手、待办对话与日程等通用功能使用。": "所有 DeepSeek 功能共用这个 API Key；通用接口地址和默认模型供学习助手、待办对话与日程使用。",
+  "所有 DeepSeek 功能共用此 API Key、接口地址和默认模型；AI 解释、仓库指南、学习助手、待办对话与日程均使用这里的配置。": "AI 解释、仓库指南、学习助手、待办对话与日程共用这里的 API Key、接口地址和默认模型。",
   "Codex 在本机以只读方式生成草案。预习和日程只有在你确认后才写入学习数据。": "管理界面、AI 工具与日程。AI 草案经你确认后写入。",
   "留空使用 Codex 当前默认模型。实际测试建议选 Luna 轻量模型。": "留空使用 Codex 当前默认模型。",
   "DeepSeek API · 全插件共用": "DeepSeek API",

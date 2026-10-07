@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 
 const DEFAULT_EXECUTABLE = 'codex';
+function abortError() { const error = new Error(tr('已停止生成。')); error.name = 'AbortError'; return error; }
 
 class CodexClient {
   constructor(options = {}) {
@@ -39,19 +40,28 @@ class CodexClient {
   _dispatchTurnWaiters() {
     while (!this.closed && this.runningTurns < this.maxConcurrentTurns && this.turnWaiters.length) {
       const waiter = this.turnWaiters.shift();
+      waiter.cleanup?.();
       this.runningTurns++;
       waiter.resolve();
     }
   }
 
-  _acquireTurnSlot(onStatus) {
+  _acquireTurnSlot(onStatus, signal) {
+    if (signal?.aborted) return Promise.reject(abortError());
     if (this.closed) return Promise.reject(new Error(tr("Codex 连接已关闭。")));
     if (this.runningTurns < this.maxConcurrentTurns) {
       this.runningTurns++;
       return Promise.resolve();
     }
     try { onStatus?.('queued'); } catch (_) { /* Status callbacks are optional. */ }
-    return new Promise((resolve, reject) => this.turnWaiters.push({ resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      const abort = () => { this.turnWaiters = this.turnWaiters.filter(item => item !== waiter); waiter.cleanup(); reject(abortError()); };
+      waiter.cleanup = () => signal?.removeEventListener('abort', abort);
+      this.turnWaiters.push(waiter);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    });
   }
 
   _releaseTurnSlot() {
@@ -127,16 +137,18 @@ class CodexClient {
   // Each thread has its own notification route; a small semaphore bounds local
   // resource use while allowing independent Codex turns to run simultaneously.
   async runStructured(options = {}) {
-    await this._acquireTurnSlot(options.onStatus);
+    await this._acquireTurnSlot(options.onStatus, options.signal);
     try { return await this._runStructured(options); }
     finally { this._releaseTurnSlot(); }
   }
 
-  async _runStructured({ prompt, schema, model, effort, timeoutMs, onProgress, onStatus, onReasoningSummary, onTokenUsage } = {}) {
+  async _runStructured({ prompt, schema, model, effort, timeoutMs, onProgress, onStatus, onReasoningSummary, onTokenUsage, signal } = {}) {
+    if (signal?.aborted) throw abortError();
     if (!prompt || typeof prompt !== 'string') throw new Error(tr("Codex 请求缺少提示内容。"));
     if (!schema || typeof schema !== 'object') throw new Error(tr("Codex 请求缺少 JSON 输出结构。"));
     onStatus?.('connecting');
     await this.connect();
+    if (signal?.aborted) throw abortError();
     onStatus?.('starting');
     const threadParams = {
       cwd: this.cwd,
@@ -146,6 +158,7 @@ class CodexClient {
     };
     if (model) threadParams.model = model;
     const started = await this._request('thread/start', threadParams);
+    if (signal?.aborted) throw abortError();
     const threadId = started && started.thread && started.thread.id;
     if (!threadId) throw new Error(tr("Codex 未返回会话 ID。"));
 
@@ -185,15 +198,22 @@ class CodexClient {
     // when the caller can display it; never subscribe the UI to raw reasoning.
     if (onReasoningSummary) turnParams.summary = 'concise';
     const deadline = timeoutMs || this.turnTimeoutMs;
+    let cancelled = false, cancellationError;
+    const interrupt = () => { if (active.turnId) this._request('turn/interrupt', { threadId, turnId: active.turnId }, 5000).catch(() => {}); };
+    const abort = () => { cancelled = true; cancellationError = abortError(); interrupt(); active.reject(cancellationError); };
+    signal?.addEventListener('abort', abort, { once: true });
     active.timer = setTimeout(() => {
+      cancelled = true;
       if (active.turnId) {
         this._request('turn/interrupt', { threadId, turnId: active.turnId }, 5000).catch(() => {});
       }
-      active.reject(new Error(tr("Codex 生成超过 {0} 分钟，请重试。", [Math.ceil(deadline / 60000)])));
+      cancellationError = new Error(tr("Codex 生成超过 {0} 分钟，请重试。", [Math.ceil(deadline / 60000)]));
+      active.reject(cancellationError);
     }, deadline);
     try {
       const turn = await this._request('turn/start', turnParams);
       active.turnId = turn && turn.turn && turn.turn.id;
+      if (cancelled || signal?.aborted) { interrupt(); throw cancellationError || abortError(); }
       onStatus?.('generating');
       const message = await completed;
       try {
@@ -202,6 +222,7 @@ class CodexClient {
         throw new Error(tr("Codex 未返回符合 JSON 格式的草案。"));
       }
     } finally {
+      signal?.removeEventListener('abort', abort);
       clearTimeout(active.timer);
       if (this.activeTurns.get(threadId) === active) this.activeTurns.delete(threadId);
     }
@@ -277,7 +298,7 @@ class CodexClient {
     } else if (message.method === 'item/reasoning/summaryTextDelta') {
       try { active.onStatus?.('thinking'); } catch (_) { /* UI callback is optional. */ }
       if (typeof active.onReasoningSummary === 'function' && typeof message.params.delta === 'string') {
-        try { active.onReasoningSummary(message.params.delta, message.params.summaryIndex); } catch (_) { /* UI callback is optional. */ }
+        try { active.onReasoningSummary(message.params.delta, message.params.summaryIndex, {itemId:message.params.itemId,turnId:message.params.turnId}); } catch (_) { /* UI callback is optional. */ }
       }
     } else if (message.method === 'item/agentMessage/delta') {
       try { active.onStatus?.('receiving'); } catch (_) { /* UI callback is optional. */ }
@@ -314,7 +335,7 @@ class CodexClient {
 
   close() {
     this.closed = true;
-    for (const waiter of this.turnWaiters.splice(0)) waiter.reject(new Error(tr("Codex 连接已关闭。")));
+    for (const waiter of this.turnWaiters.splice(0)) { waiter.cleanup?.(); waiter.reject(new Error(tr("Codex 连接已关闭。"))); }
     if (this.process) this.process.kill();
     this._failAll(new Error(tr("Codex 连接已关闭。")));
   }
